@@ -4,7 +4,6 @@ package Server
 import (
 	"log"
 	"net"
-	"net/http"
 	"net/rpc"
 	"strconv"
 )
@@ -29,20 +28,18 @@ func (rpcSer *RpcServer) Run() error {
 	if err != nil {
 		return err
 	}
-	rpc.HandleHTTP()
-	l, err := net.Listen("tcp", "localhost:1234")
+	listener, err := net.Listen("tcp", "localhost:1234")
 	if err != nil {
 		return err
 	}
-	go http.Serve(l, nil)
-	log.Println("rpc Server begin listen")
 
-	//for {
-	//	conn, err := listener.Accept()
-	//	if err != nil {
-	//		log.Fatal("Accept error: ", err)
-	//	}
-	//	go rpc.ServeConn(conn)
-	//}
+	log.Println("rpc Server begin listen")
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Fatal("Accept error: ", err)
+		}
+		go rpc.ServeConn(conn)
+	}
 	return nil
 }
