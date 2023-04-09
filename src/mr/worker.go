@@ -27,16 +27,17 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	workerId := 782932
-	heartbeatPeriod := 300 //300 Millisecond
+	heartbeatPeriod := 300 // Millisecond
 	log.Printf("worker:%d begin to work.\n", workerId)
 	log.Println("socket name:" + coordinatorSock())
 
 	// Your worker implementation here.
-	// uncomment to send the Example RPC to the coordinator.
-	registerToCoordinator(workerId)
+	registerToCoordinator(workerId)       //register present worker
+	go imAlive(workerId, heartbeatPeriod) //sending alive signal periodically
+
 	for {
-		imAlive(workerId)
-		time.Sleep(time.Duration(heartbeatPeriod) * time.Millisecond)
+		log.Println("do something...")
+		time.Sleep(10 * time.Second)
 	}
 
 }
@@ -50,14 +51,17 @@ func registerToCoordinator(workerId int) {
 	}
 }
 
-func imAlive(workerId int) {
-	reply := new(Reply)
-	ok := call("Coordinator.ImAlive", workerId, reply)
-	if ok {
-		log.Printf("Worker:%d Alive signal has sent.", workerId)
-	} else {
-		log.Println("Alive signal sending failed!")
+func imAlive(workerId int, period int) {
+	for {
+		ok := call("Coordinator.ImAlive", workerId, nil)
+		if !ok {
+			log.Println("Alive signal sending failed!")
+		} else {
+			//log.Printf("Worker:%d Alive signal has sent.", workerId)
+		}
+		time.Sleep(time.Duration(period) * time.Millisecond)
 	}
+
 }
 
 // example function to show how to make an RPC call to the coordinator.

@@ -80,7 +80,7 @@ func (c *Coordinator) ReqTask(workerId int, reply *Reply) error {
 func (c *Coordinator) ImAlive(workerId int, reply *Reply) error {
 	c.Workers[workerId].IsAlive = true
 	reply.Status = 200
-	log.Printf("Worker:%d is still alive", workerId)
+	//log.Printf("Worker:%d is still alive", workerId)
 	return nil
 }
 
