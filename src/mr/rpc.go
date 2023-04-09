@@ -14,16 +14,23 @@ import "strconv"
 // and reply for an RPC.
 //
 
-type ExampleArgs struct {
-	X int
-}
+/*
+	Status
+	Common
+	-1		error
+	200		ok
 
-type ExampleReply struct {
-	Y int
+		Coordinator.ReqTask
+		201		Map Task
+		202		Reduce Task
+*/
+
+type Reply struct {
+	Status int
+	Data   string
 }
 
 // Add your RPC definitions here.
-
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
