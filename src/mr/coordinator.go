@@ -20,7 +20,6 @@ import "net/http"
 // MapTask Map Task input files
 type MapTask struct {
 	IsDispatched bool //indicate weather a filename is dispatched
-	IsDone       bool //do not need this
 	WorkerId     int
 	lock         sync.Mutex
 }
@@ -28,7 +27,6 @@ type MapTask struct {
 // ReduceTask Reduce Task input files
 type ReduceTask struct {
 	IsDispatched bool //indicate weather a filename is dispatched
-	IsDone       bool
 	WorkerId     int
 	lock         sync.Mutex
 }
@@ -101,6 +99,7 @@ func (c *Coordinator) ReqTask(workerId int, reply *Reply) error {
 				reply.Status = 201
 				reply.Data = filename
 				mapTask.IsDispatched = true
+				mapTask.WorkerId = workerId
 				mapTask.lock.Unlock()
 				break
 			}
@@ -119,6 +118,7 @@ func (c *Coordinator) ReqTask(workerId int, reply *Reply) error {
 				reply.Status = 202
 				reply.Data = filename
 				reduceTask.IsDispatched = true
+				reduceTask.WorkerId = workerId
 				reduceTask.lock.Unlock()
 				break
 			}
@@ -197,30 +197,24 @@ func (c *Coordinator) server() {
 	log.Println("Coordinator begin to serve. Socket name:" + coordinatorSock())
 }
 
-// main/mrcoordinator.go calls Done() periodically to find out
+// Done main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
 
 	// Your code here.
-	done := true
-	for _, afile := range c.MapTasks {
-		if !afile.IsDone {
-			done = false
-			break
-		}
+	done := false
+	c.MapTasksLock.RLock()
+	c.ReduceTasksLock.RLock()
+	if len(c.MapTasks) == 0 && len(c.ReduceTasks) == 0 {
+		done = true
 	}
-
-	for _, bfile := range c.ReduceTasks {
-		if !bfile.IsDone {
-			done = false
-			break
-		}
-	}
+	c.MapTasksLock.RUnlock()
+	c.ReduceTasksLock.RUnlock()
 
 	return done
 }
 
-// create a Coordinator.
+// MakeCoordinator create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
@@ -240,7 +234,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		c.MapTasks[name] = new(MapTask)
 	}
 
+	//submissions
 	go aliveDetection(c)
+	// go TLEDetection(c)
 	// My code end.
 	c.server()
 	return c
