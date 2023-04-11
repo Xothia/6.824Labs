@@ -7,12 +7,12 @@ import (
 	"sync"
 )
 
-// 调用远程服务
+// Client 调用远程服务
 type Client int
 
 func (cli *Client) RunTestExample() error {
 	log.Println("Cli is trying dial...")
-	dial, err := rpc.Dial("tcp", "localhost:1234")
+	dial, err := rpc.Dial("unix", "../socketFile")
 	if err != nil {
 		return err
 	}

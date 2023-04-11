@@ -26,7 +26,8 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
-	workerId := 782932
+	//workerId := 782932
+	workerId := time.Now().Nanosecond()
 	heartbeatPeriod := 300 // Millisecond
 	log.Printf("worker:%d begin to work.\n", workerId)
 	log.Println("socket name:" + coordinatorSock())
@@ -41,6 +42,16 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 
 }
+func askForTask(workerId int) {
+	reply := new(Reply)
+	ok := call("Coordinator.RegisterWorker", workerId, reply)
+	if ok {
+		log.Println("Worker Has Registered.")
+	} else {
+		log.Println("Register failed!")
+	}
+}
+
 func registerToCoordinator(workerId int) {
 	reply := new(Reply)
 	ok := call("Coordinator.RegisterWorker", workerId, reply)

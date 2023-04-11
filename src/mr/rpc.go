@@ -23,7 +23,14 @@ import "strconv"
 		Coordinator.ReqTask
 		201		Map Task
 		202		Reduce Task
+		203		No un-dispatched tasks
+		204		all work done
 */
+
+type TaskDoneReqArgs struct {
+	WorkerId       int
+	OutputFilename string
+}
 
 type Reply struct {
 	Status int

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"net/rpc"
+	"os"
 	"strconv"
 )
 
@@ -28,10 +29,12 @@ func (rpcSer *RpcServer) Run() error {
 	if err != nil {
 		return err
 	}
-	listener, err := net.Listen("tcp", "localhost:1234")
+	os.Remove("../socketFile")
+	listener, err := net.Listen("unix", "../socketFile")
 	if err != nil {
 		return err
 	}
+	defer listener.Close()
 
 	log.Println("rpc Server begin listen")
 	for {
