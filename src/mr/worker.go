@@ -37,23 +37,39 @@ func Worker(mapf func(string, string) []KeyValue,
 	go imAlive(workerId, heartbeatPeriod) //sending alive signal periodically
 
 	for { //main loop
-		task := askForTask(workerId)
-		processTask(task.Status, task.Data)
+		reply := askForTask(workerId)
+		outputFilename := processTask(reply.Status, reply.Data) //processing
 
-		time.Sleep(11 * time.Second)
+		switch reply.Status {
+		case 201: //map task done
+			callMapTaskDone(TaskDoneReqArgs{
+				WorkerId:       workerId,
+				OutputFilename: outputFilename,
+			})
+		case 202: //reduce task done
+
+		case 204: //all work done.
+			break
+		}
+
 	}
 
 }
 
-func processTask(taskStatus int, filename string) {
+//return OutputFilename
+func processTask(taskCate int, filename string) string {
 
-	switch taskStatus {
+	outputFilename := ""
+	switch taskCate {
 	case 201:
 		//Map Task
 		log.Println("processing map task.filename:" + filename)
+		outputFilename = filename
+
 	case 202:
 		//Reduce Task
 		log.Println("processing reduce task.filename:" + filename)
+		outputFilename = filename
 	case 203:
 		//No un-dispatched tasks
 		log.Println("No un-dispatched tasks.")
@@ -61,16 +77,28 @@ func processTask(taskStatus int, filename string) {
 	case 204: //all work done
 		log.Println("all work done.")
 	}
+	time.Sleep(7 * time.Second)
+	return outputFilename
+}
 
+func callMapTaskDone(args TaskDoneReqArgs) *Reply {
+	reply := new(Reply)
+	ok := call("Coordinator.MapTaskDone", args, reply)
+	if !ok {
+		log.Println("callMapTaskDone failed!")
+	} else {
+		//log.Println("Worker get a task:" + reply.Data)
+	}
+	return reply
 }
 
 func askForTask(workerId int) *Reply {
 	reply := new(Reply)
 	ok := call("Coordinator.ReqTask", workerId, reply)
-	if ok {
-		log.Println("Worker get a task:" + reply.Data)
-	} else {
+	if !ok {
 		log.Println("Get task failed!")
+	} else {
+		//log.Println("Worker get a task:" + reply.Data)
 	}
 	return reply
 }

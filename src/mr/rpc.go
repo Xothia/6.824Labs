@@ -25,6 +25,9 @@ import "strconv"
 		202		Reduce Task
 		203		No un-dispatched tasks
 		204		all work done
+
+		Coordinator.MapTaskDone
+		301		caller is a dead or tle worker
 */
 
 type TaskDoneReqArgs struct {
