@@ -113,7 +113,7 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			buket[i] = kvSlice
 		}
 		for _, kv := range intermediate { //push kvs into buket
-			i := ihash(kv.Key)
+			i := ihash(kv.Key) % nReduce
 			buket[i] = append(buket[i], kv)
 		}
 		for i := 0; i < nReduce; i++ { //sort and write file
