@@ -120,11 +120,11 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			sort.Sort(buket[i]) //sort
 			//write file
 			outputFilename = "mr-" + filename + "-" + strconv.Itoa(i)
-			midFile, _ := os.Open(outputFilename)
+			midFile, _ := os.Create(outputFilename)
 			enc := json.NewEncoder(midFile)
 			for _, kv := range buket[i] {
-				err := enc.Encode(&kv)
-				log.Fatal(err.Error())
+				err := enc.Encode(kv)
+				log.Fatal("write file wrong:" + err.Error())
 			}
 			//	TODO rename after complete write
 		}
