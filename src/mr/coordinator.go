@@ -151,7 +151,16 @@ func (c *Coordinator) ReqTask(workerId int, reply *Reply) error {
 }
 
 func (c *Coordinator) MapTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
-
+	c.WorkersLock.RLock()
+	if worker, ok := c.Workers[arg.WorkerId]; ok {
+		filename := worker.Filename
+		c.deleteMapTask(filename)
+		c.ReduceTasksLock.Lock()
+		r := new(ReduceTask)
+		c.ReduceTasks[filename] = r
+		c.ReduceTasksLock.Unlock()
+	}
+	c.WorkersLock.RUnlock()
 	return nil
 }
 
@@ -164,7 +173,9 @@ func (c *Coordinator) ReduceTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
 func (c *Coordinator) ImAlive(workerId int, reply *Reply) error {
 	//update do not need to write lock
 	c.WorkersLock.RLock()
-	c.Workers[workerId].IsAlive = true
+	if _, ok := c.Workers[workerId]; ok {
+		c.Workers[workerId].IsAlive = true
+	}
 	c.WorkersLock.RUnlock()
 
 	reply.Status = 200
@@ -182,8 +193,8 @@ func TLEDetection(c *Coordinator) error {
 			seconds := time.Now().Sub(aWorker.TaskBeginTime).Seconds()
 			if len(aWorker.Filename) != 0 && aWorker.IsAlive && seconds > float64(limit) {
 				//tle
-				log.Printf("worker:%d tle.\n", workerId)
-
+				log.Printf("worker:%d tle.redispatching %s task", workerId, aWorker.Filename)
+				retrievingTask(c, aWorker)
 			}
 		}
 		c.WorkersLock.RUnlock()
@@ -204,6 +215,7 @@ func aliveDetection(c *Coordinator) error {
 				log.Printf("worker:%d is dead. redispatching %s task", id, worker.Filename)
 				//solution
 				//可能是map任务失败或者是reduce任务失败
+				retrievingTask(c, worker)
 			}
 			//maybe concurrency issue ImAlive
 			worker.IsAlive = false
@@ -212,8 +224,39 @@ func aliveDetection(c *Coordinator) error {
 	}
 }
 
-func reAssignTask() { //worker disabled
+//when a worker disabled something need to be done
+func retrievingTask(c *Coordinator, worker *AWorker) { //worker disabled
 
+	if mapTask, ok1 := c.MapTasks[worker.Filename]; ok1 {
+		mapTask.lock.Lock()
+		mapTask.IsDispatched = false
+		mapTask.WorkerId = -1
+		mapTask.lock.Unlock()
+	} else if reduceTask, ok2 := c.ReduceTasks[worker.Filename]; ok2 {
+		reduceTask.lock.Lock()
+		reduceTask.IsDispatched = false
+		reduceTask.WorkerId = -1
+		reduceTask.lock.Unlock()
+	}
+	worker.TaskBeginTime = time.Time{}
+	worker.Filename = ""
+
+}
+
+func (c *Coordinator) deleteWorker(workerId int) {
+	c.WorkersLock.Lock()
+	delete(c.Workers, workerId)
+	c.WorkersLock.Unlock()
+}
+func (c *Coordinator) deleteMapTask(filename string) {
+	c.MapTasksLock.Lock()
+	delete(c.MapTasks, filename)
+	c.MapTasksLock.Unlock()
+}
+func (c *Coordinator) deleteReduceTask(filename string) {
+	c.ReduceTasksLock.Lock()
+	delete(c.ReduceTasks, filename)
+	c.ReduceTasksLock.Unlock()
 }
 
 // start a thread that listens for RPCs from worker.go

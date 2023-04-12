@@ -40,25 +40,26 @@ func Worker(mapf func(string, string) []KeyValue,
 		task := askForTask(workerId)
 		processTask(task.Status, task.Data)
 
-		time.Sleep(10 * time.Second)
+		time.Sleep(11 * time.Second)
 	}
 
 }
 
-func processTask(taskStatus int, taskData string) {
-	log.Println("processing task.")
+func processTask(taskStatus int, filename string) {
+
 	switch taskStatus {
 	case 201:
-	//Map Task
-
+		//Map Task
+		log.Println("processing map task.filename:" + filename)
 	case 202:
-	//Reduce Task
-
+		//Reduce Task
+		log.Println("processing reduce task.filename:" + filename)
 	case 203:
-	//No un-dispatched tasks
+		//No un-dispatched tasks
+		log.Println("No un-dispatched tasks.")
 
 	case 204: //all work done
-
+		log.Println("all work done.")
 	}
 
 }
