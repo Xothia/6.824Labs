@@ -123,7 +123,7 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			midFile, _ := os.Create(outputFilename)
 			enc := json.NewEncoder(midFile)
 			for _, kv := range buket[i] {
-				err := enc.Encode(kv)
+				err := enc.Encode(&kv)
 				log.Fatal("write file wrong:" + err.Error())
 			}
 			//	TODO rename after complete write
