@@ -55,6 +55,7 @@ type Coordinator struct {
 	allMapTaskIsDone bool //
 	aliveDetectionT  int  //seconds
 	tleDetectionT    int  //seconds
+	tleLimit         int  //seconds
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -94,13 +95,20 @@ func (c *Coordinator) ReqTask(workerId int, reply *Reply) error {
 		for filename, mapTask := range c.MapTasks {
 			mapTask.lock.Lock()
 			if !mapTask.IsDispatched {
-				c.MapTasksLock.RUnlock()
+				//c.MapTasksLock.RUnlock()
 				//assign map task
 				reply.Status = 201
 				reply.Data = filename
+
 				mapTask.IsDispatched = true
 				mapTask.WorkerId = workerId
 				mapTask.lock.Unlock()
+
+				c.WorkersLock.RLock()
+				aWorker := c.Workers[workerId]
+				c.WorkersLock.RUnlock()
+				aWorker.TaskBeginTime = time.Now()
+				aWorker.Filename = filename
 				break
 			}
 			mapTask.lock.Unlock()
@@ -113,13 +121,20 @@ func (c *Coordinator) ReqTask(workerId int, reply *Reply) error {
 		for filename, reduceTask := range c.ReduceTasks {
 			reduceTask.lock.Lock()
 			if !reduceTask.IsDispatched {
-				c.ReduceTasksLock.RUnlock()
+				//c.ReduceTasksLock.RUnlock()
 				//assign reduce task
 				reply.Status = 202
 				reply.Data = filename
+
 				reduceTask.IsDispatched = true
 				reduceTask.WorkerId = workerId
 				reduceTask.lock.Unlock()
+
+				c.WorkersLock.RLock()
+				aWorker := c.Workers[workerId]
+				c.WorkersLock.RUnlock()
+				aWorker.TaskBeginTime = time.Now()
+				aWorker.Filename = filename
 				break
 			}
 			reduceTask.lock.Unlock()
@@ -161,24 +176,39 @@ func (c *Coordinator) ImAlive(workerId int, reply *Reply) error {
 func TLEDetection(c *Coordinator) error {
 	for {
 		time.Sleep(time.Duration(c.tleDetectionT) * time.Second)
+		c.WorkersLock.RLock()
+		for workerId, aWorker := range c.Workers {
+			limit := c.tleLimit
+			seconds := time.Now().Sub(aWorker.TaskBeginTime).Seconds()
+			if len(aWorker.Filename) != 0 && aWorker.IsAlive && seconds > float64(limit) {
+				//tle
+				log.Printf("worker:%d tle.\n", workerId)
+
+			}
+		}
+		c.WorkersLock.RUnlock()
 	}
-	return nil
 }
 
 func aliveDetection(c *Coordinator) error {
+
 	for {
 		//sleep given seconds
 		time.Sleep(time.Duration(c.aliveDetectionT) * time.Second)
 
 		//check workers weather is alive
+		c.WorkersLock.RLock()
 		for id, worker := range c.Workers {
+
 			if !worker.IsAlive {
 				log.Printf("worker:%d is dead. redispatching %s task", id, worker.Filename)
 				//solution
 				//可能是map任务失败或者是reduce任务失败
 			}
+			//maybe concurrency issue ImAlive
 			worker.IsAlive = false
 		}
+		c.WorkersLock.RUnlock()
 	}
 }
 
@@ -236,7 +266,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	//submissions
 	go aliveDetection(c)
-	// go TLEDetection(c)
+	go TLEDetection(c)
 	// My code end.
 	c.server()
 	return c
