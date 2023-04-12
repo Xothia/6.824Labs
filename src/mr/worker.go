@@ -117,7 +117,8 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			buket[i] = append(buket[i], kv)
 		}
 		for i := 0; i < nReduce; i++ { //sort and write file
-			sort.Sort(buket[i]) //sort
+			sort.Sort(buket[i])                       //sort
+			buket[i] = earlyReduce(buket[i], reducef) //call reduce on one buket
 			//write file
 			outputFilename = "mr-" + filename + "-" + strconv.Itoa(i)
 			midFile, _ := os.Create(outputFilename)
@@ -146,6 +147,28 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 	}
 	time.Sleep(7 * time.Second)
 	return outputFilename
+}
+
+func earlyReduce(kvs KVSlice, reducef func(string, []string) string) KVSlice {
+	res := make(KVSlice, 50)
+	// call Reduce on each distinct key in kvs,
+	i := 0
+	for i < len(kvs) {
+		j := i + 1
+		for j < len(kvs) && kvs[j].Key == kvs[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, kvs[k].Value)
+		}
+		output := reducef(kvs[i].Key, values)
+		kv := KeyValue{kvs[i].Key, output}
+		res = append(res, kv)
+
+		i = j
+	}
+	return res
 }
 
 func callMapTaskDone(args TaskDoneReqArgs) *Reply {
@@ -193,7 +216,7 @@ func imAlive(workerId int, period int) {
 
 }
 
-// example function to show how to make an RPC call to the coordinator.
+// CallExample example function to show how to make an RPC call to the coordinator.
 //
 // the RPC argument and reply types are defined in rpc.go.
 func CallExample(workerId int) {
