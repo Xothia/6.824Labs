@@ -109,7 +109,7 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 		//init a buket
 		buket := make([]KVSlice, nReduce)
 		for i := 0; i < nReduce; i++ {
-			kvSlice := make(KVSlice, 50)
+			kvSlice := make(KVSlice, 0)
 			buket[i] = kvSlice
 		}
 		for _, kv := range intermediate { //push kvs into buket
@@ -150,7 +150,7 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 }
 
 func earlyReduce(kvs KVSlice, reducef func(string, []string) string) KVSlice {
-	res := make(KVSlice, 50)
+	res := make(KVSlice, 0)
 	// call Reduce on each distinct key in kvs,
 	i := 0
 	for i < len(kvs) {
