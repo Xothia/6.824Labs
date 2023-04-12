@@ -8,7 +8,7 @@ import "log"
 import "net/rpc"
 import "hash/fnv"
 
-// Map functions return a slice of KeyValue.
+// KeyValue Map functions return a slice of KeyValue.
 type KeyValue struct {
 	Key   string
 	Value string
@@ -22,7 +22,7 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-// main/mrworker.go calls this function.
+// Worker main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
@@ -36,15 +36,34 @@ func Worker(mapf func(string, string) []KeyValue,
 	registerToCoordinator(workerId)       //register present worker
 	go imAlive(workerId, heartbeatPeriod) //sending alive signal periodically
 
-	for {
-		log.Println("do something...")
-		//time.Sleep(10 * time.Second)
-		askForTask(workerId)
+	for { //main loop
+		task := askForTask(workerId)
+		processTask(task.Status, task.Data)
+
 		time.Sleep(10 * time.Second)
 	}
 
 }
-func askForTask(workerId int) {
+
+func processTask(taskStatus int, taskData string) {
+	log.Println("processing task.")
+	switch taskStatus {
+	case 201:
+	//Map Task
+
+	case 202:
+	//Reduce Task
+
+	case 203:
+	//No un-dispatched tasks
+
+	case 204: //all work done
+
+	}
+
+}
+
+func askForTask(workerId int) *Reply {
 	reply := new(Reply)
 	ok := call("Coordinator.ReqTask", workerId, reply)
 	if ok {
@@ -52,6 +71,7 @@ func askForTask(workerId int) {
 	} else {
 		log.Println("Get task failed!")
 	}
+	return reply
 }
 
 func registerToCoordinator(workerId int) {

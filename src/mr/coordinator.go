@@ -212,6 +212,10 @@ func aliveDetection(c *Coordinator) error {
 	}
 }
 
+func reAssignTask() { //worker disabled
+
+}
+
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
 	rpc.Register(c)
@@ -256,6 +260,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.ReduceTasks = make(map[string]*ReduceTask, 10)
 	c.aliveDetectionT = 1
 	c.tleDetectionT = 1
+	c.tleLimit = 10
 	c.nReduce = nReduce
 
 	//init Files
