@@ -82,7 +82,7 @@ func (c *Coordinator) RegisterWorker(workerId int, reply *Reply) error {
 	return nil
 }
 
-func (c *Coordinator) ReqTask(workerId int, reply *Reply) error {
+func (c *Coordinator) ReqTask(workerId int, reply *AskForTaskReply) error {
 	//default -1
 	reply.Status = -1
 
@@ -98,7 +98,8 @@ func (c *Coordinator) ReqTask(workerId int, reply *Reply) error {
 				//c.MapTasksLock.RUnlock()
 				//assign map task
 				reply.Status = 201
-				reply.Data = filename
+				reply.Filename = filename
+				reply.NReduce = c.nReduce
 
 				mapTask.IsDispatched = true
 				mapTask.WorkerId = workerId
@@ -124,7 +125,8 @@ func (c *Coordinator) ReqTask(workerId int, reply *Reply) error {
 				//c.ReduceTasksLock.RUnlock()
 				//assign reduce task
 				reply.Status = 202
-				reply.Data = filename
+				reply.Filename = filename
+				reply.NReduce = c.nReduce
 
 				reduceTask.IsDispatched = true
 				reduceTask.WorkerId = workerId
@@ -233,7 +235,7 @@ func aliveDetection(c *Coordinator) error {
 	}
 }
 
-//when a worker disabled something need to be done
+// when a worker disabled something need to be done
 func retrievingTask(c *Coordinator, worker *AWorker) { //worker disabled
 
 	if mapTask, ok1 := c.MapTasks[worker.Filename]; ok1 {

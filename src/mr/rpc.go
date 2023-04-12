@@ -32,9 +32,13 @@ import "strconv"
 
 type TaskDoneReqArgs struct {
 	WorkerId       int
-	OutputFilename string
+	OutputFilename string //as for reduce task it will contain * which need solve with filepath.Glob
 }
-
+type AskForTaskReply struct {
+	Status   int
+	Filename string
+	NReduce  int
+}
 type Reply struct {
 	Status int
 	Data   string

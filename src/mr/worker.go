@@ -1,7 +1,12 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"sort"
+	"strconv"
 	"time"
 )
 import "log"
@@ -12,6 +17,18 @@ import "hash/fnv"
 type KeyValue struct {
 	Key   string
 	Value string
+}
+
+type KVSlice []KeyValue
+
+func (K KVSlice) Len() int {
+	return len(K)
+}
+func (K KVSlice) Less(i, j int) bool {
+	return K[i].Key < K[j].Key
+}
+func (K KVSlice) Swap(i, j int) {
+	K[i], K[j] = K[j], K[i]
 }
 
 // use ihash(key) % NReduce to choose reduce task number
@@ -38,7 +55,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	for { //main loop
 		reply := askForTask(workerId)
-		outputFilename := processTask(reply.Status, reply.Data) //processing
+		outputFilename := processTask(reply, mapf, reducef) //processing
 
 		switch reply.Status {
 		case 201: //map task done
@@ -56,18 +73,66 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
-//return OutputFilename
-func processTask(taskCate int, filename string) string {
-
+// return OutputFilename
+func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) string {
+	//intermediate files is mr-X-Y, where X is the Map task number, and Y is the reduce task number.
 	outputFilename := ""
-	switch taskCate {
+	status := reply.Status
+	filename := reply.Filename
+	nReduce := reply.NReduce
+
+	switch status {
 	case 201:
-		//Map Task
+		//The map phase should divide the intermediate keys into buckets for nReduce
+		//reduce tasks, where nReduce is the number of reduce tasks --
+		//the argument that main/mrcoordinator.go passes to MakeCoordinator().
+		//Each mapper should create nReduce intermediate files for consumption
+		//by the reduce tasks.
+		//filepath.Glob
 		log.Println("processing map task.filename:" + filename)
-		outputFilename = filename
+
+		//read file
+		var intermediate []KeyValue
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %v", filename)
+		}
+		content, err := io.ReadAll(file)
+		if err != nil {
+			log.Fatalf("cannot read %v", filename)
+		}
+		file.Close()
+		kva := mapf(filename, string(content))
+		intermediate = append(intermediate, kva...)
+
+		//init a buket
+		buket := make([]KVSlice, nReduce)
+		for i := 0; i < nReduce; i++ {
+			kvSlice := make(KVSlice, 50)
+			buket[i] = kvSlice
+		}
+		for _, kv := range intermediate { //push kvs into buket
+			i := ihash(kv.Key)
+			buket[i] = append(buket[i], kv)
+		}
+		for i := 0; i < nReduce; i++ { //sort and write file
+			sort.Sort(buket[i]) //sort
+			//write file
+			outputFilename = "mr-" + filename + "-" + strconv.Itoa(i)
+			midFile, _ := os.Open(outputFilename)
+			enc := json.NewEncoder(midFile)
+			for _, kv := range buket[i] {
+				err := enc.Encode(&kv)
+				log.Fatal(err.Error())
+			}
+			//	TODO rename after complete write
+		}
+		outputFilename = "mr-" + filename + "-*"
 
 	case 202:
 		//Reduce Task
+		// put the output of the X'th reduce task in the file mr-out-X.
 		log.Println("processing reduce task.filename:" + filename)
 		outputFilename = filename
 	case 203:
@@ -92,8 +157,8 @@ func callMapTaskDone(args TaskDoneReqArgs) *Reply {
 	return reply
 }
 
-func askForTask(workerId int) *Reply {
-	reply := new(Reply)
+func askForTask(workerId int) *AskForTaskReply {
+	reply := new(AskForTaskReply)
 	ok := call("Coordinator.ReqTask", workerId, reply)
 	if !ok {
 		log.Println("Get task failed!")
