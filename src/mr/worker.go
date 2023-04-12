@@ -38,15 +38,17 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	for {
 		log.Println("do something...")
+		//time.Sleep(10 * time.Second)
+		askForTask(workerId)
 		time.Sleep(10 * time.Second)
 	}
 
 }
 func askForTask(workerId int) {
 	reply := new(Reply)
-	ok := call("Coordinator.RegisterWorker", workerId, reply)
+	ok := call("Coordinator.ReqTask", workerId, reply)
 	if ok {
-		log.Println("Worker Has Registered.")
+		log.Println("Worker get a task:" + reply.Data)
 	} else {
 		log.Println("Register failed!")
 	}
