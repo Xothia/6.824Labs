@@ -150,15 +150,20 @@ func (c *Coordinator) ReqTask(workerId int, reply *Reply) error {
 	return nil
 }
 
+// MapTaskDone delete a map task and add a reduce task
 func (c *Coordinator) MapTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
+	//what if a tle worker call this function?
+	reply.Status = 200
 	c.WorkersLock.RLock()
-	if worker, ok := c.Workers[arg.WorkerId]; ok {
+	if worker, ok := c.Workers[arg.WorkerId]; ok && len(worker.Filename) != 0 {
 		filename := worker.Filename
 		c.deleteMapTask(filename)
 		c.ReduceTasksLock.Lock()
 		r := new(ReduceTask)
-		c.ReduceTasks[filename] = r
+		c.ReduceTasks[arg.OutputFilename] = r
 		c.ReduceTasksLock.Unlock()
+	} else {
+		reply.Status = 301 //caller is a dead or tle worker
 	}
 	c.WorkersLock.RUnlock()
 	return nil
@@ -212,10 +217,14 @@ func aliveDetection(c *Coordinator) error {
 		for id, worker := range c.Workers {
 
 			if !worker.IsAlive {
-				log.Printf("worker:%d is dead. redispatching %s task", id, worker.Filename)
 				//solution
 				//可能是map任务失败或者是reduce任务失败
-				retrievingTask(c, worker)
+				if len(worker.Filename) != 0 {
+					log.Printf("worker:%d is dead. redispatching %s task", id, worker.Filename)
+					retrievingTask(c, worker)
+				} else {
+					log.Printf("worker:%d is dead. ", id)
+				}
 			}
 			//maybe concurrency issue ImAlive
 			worker.IsAlive = false
