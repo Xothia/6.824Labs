@@ -172,7 +172,7 @@ func (c *Coordinator) MapTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
 		if !c.switchToReduceTask {
 			c.ReduceTasksLock.Lock()
 			for i := 0; i < c.nReduce; i++ {
-				reduceTaskFilename := "mr-pg-*-" + strconv.Itoa(i)
+				reduceTaskFilename := "mr-*-" + strconv.Itoa(i)
 				r := new(ReduceTask)
 				c.ReduceTasks[reduceTaskFilename] = r
 			}
