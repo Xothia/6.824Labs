@@ -47,8 +47,8 @@ func Worker(mapf func(string, string) []KeyValue,
 	//workerId := 782932
 	workerId := time.Now().Nanosecond()
 	heartbeatPeriod := 300 // Millisecond
-	log.Printf("worker:%d begin to work.\n", workerId)
-	log.Println("socket name:" + coordinatorSock())
+	//log.Printf("worker:%d begin to work.\n", workerId)
+	//log.Println("socket name:" + coordinatorSock())
 
 	// Your worker implementation here.
 	registerToCoordinator(workerId)       //register present worker
@@ -88,7 +88,7 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 		//the argument that main/mrcoordinator.go passes to MakeCoordinator().
 		//Each mapper should create nReduce intermediate files for consumption
 		//by the reduce tasks.
-		log.Println("processing map task.filename:" + filename)
+		//log.Println("processing map task.filename:" + filename)
 
 		//read file
 		var intermediate []KeyValue
@@ -129,7 +129,7 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 		if err != nil {
 			log.Fatal("filepath.Glob(filename) went wrong.")
 		}
-		log.Println("processing reduce task.filename:" + filename)
+		//log.Println("processing reduce task.filename:" + filename)
 		//read file
 		midKVS := make(KVSlice, 0)
 		for _, filename := range taskFilenames {
@@ -156,10 +156,10 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 		outputFilename = opFilename
 	case 203:
 		//No un-dispatched tasks
-		log.Println("No un-dispatched tasks.")
+		//log.Println("No un-dispatched tasks.")
 
 	case 204: //all work done
-		log.Println("all work done.")
+		//log.Println("all work done.")
 	}
 	//time.Sleep(3 * time.Second)
 	return outputFilename
@@ -253,7 +253,7 @@ func registerToCoordinator(workerId int) {
 	reply := new(Reply)
 	ok := call("Coordinator.RegisterWorker", workerId, reply)
 	if ok {
-		log.Println("Worker Has Registered.")
+		//log.Println("Worker Has Registered.")
 	} else {
 		log.Println("Register failed!")
 	}

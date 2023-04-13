@@ -225,12 +225,12 @@ func TLEDetection(c *Coordinator) error {
 	for {
 		time.Sleep(time.Duration(c.tleDetectionT) * time.Second)
 		c.WorkersLock.RLock()
-		for workerId, aWorker := range c.Workers {
+		for _, aWorker := range c.Workers {
 			limit := c.tleLimit
 			seconds := time.Now().Sub(aWorker.TaskBeginTime).Seconds()
 			if len(aWorker.Filename) != 0 && aWorker.IsAlive && seconds > float64(limit) {
 				//tle
-				log.Printf("worker:%d tle.redispatching %s task", workerId, aWorker.Filename)
+				//log.Printf("worker:%d tle.redispatching %s task", workerId, aWorker.Filename)
 				retrievingTask(c, aWorker)
 			}
 		}
@@ -246,16 +246,16 @@ func aliveDetection(c *Coordinator) error {
 
 		//check workers weather is alive
 		c.WorkersLock.RLock()
-		for id, worker := range c.Workers {
+		for _, worker := range c.Workers {
 
 			if !worker.IsAlive {
 				//solution
 				//可能是map任务失败或者是reduce任务失败
 				if len(worker.Filename) != 0 {
-					log.Printf("worker:%d is dead. redispatching %s task", id, worker.Filename)
+					//log.Printf("worker:%d is dead. redispatching %s task", id, worker.Filename)
 					retrievingTask(c, worker)
 				} else {
-					log.Printf("worker:%d is dead. ", id)
+					//log.Printf("worker:%d is dead. ", id)
 				}
 			}
 			//maybe concurrency issue ImAlive
@@ -310,7 +310,7 @@ func (c *Coordinator) server() {
 		log.Fatal("listen error:", e)
 	}
 	go http.Serve(l, nil)
-	log.Println("Coordinator begin to serve. Socket name:" + coordinatorSock())
+	//log.Println("Coordinator begin to serve. Socket name:" + coordinatorSock())
 }
 
 // Done main/mrcoordinator.go calls Done() periodically to find out
