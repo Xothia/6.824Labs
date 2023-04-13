@@ -32,7 +32,7 @@ type ReduceTask struct {
 	lock         sync.Mutex
 }
 
-// AWorker all workers
+// AWorker a worker
 type AWorker struct {
 	Filename      string
 	TaskBeginTime time.Time
@@ -160,19 +160,19 @@ func (c *Coordinator) ReqTask(workerId int, reply *AskForTaskReply) error {
 	return nil
 }
 
-// MapTaskDone delete a map task and add a reduce task
+// MapTaskDone delete a map task
 func (c *Coordinator) MapTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
 	//what if a tle worker call this function?
 	reply.Status = 200
 	c.WorkersLock.RLock()
+	//delete complete map task from deleteMapTask and reset aWorker
 	if worker, ok := c.Workers[arg.WorkerId]; ok && len(worker.Filename) != 0 {
 		filename := worker.Filename
-		c.deleteMapTask(filename)
-
-		//c.ReduceTasksLock.Lock()
-		//r := new(ReduceTask)
-		//c.ReduceTasks[arg.OutputFilename] = r
-		//c.ReduceTasksLock.Unlock()
+		c.deleteMapTask(filename) //delete task
+		//reset worker
+		//todo worker.reset()
+		worker.Filename = ""
+		worker.TaskBeginTime = time.Time{}
 	} else {
 		reply.Status = 301 //caller is a dead or tle worker
 	}
@@ -182,6 +182,7 @@ func (c *Coordinator) MapTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
 	if len(c.MapTasks) == 0 { //all done
 		c.allMapTaskIsDone = true
 	}
+	//when map all done switchToReduceTask
 	c.MapTasksLock.RUnlock()
 	if c.allMapTaskIsDone && !c.switchToReduceTask && !c.allReduceTaskIsDone {
 		c.switchToReduceTaskLock.Lock()
@@ -203,7 +204,7 @@ func (c *Coordinator) MapTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
 }
 
 func (c *Coordinator) ReduceTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
-	//TODO
+	//TODO reduce all done; delete reduce task?;
 	return nil
 }
 
@@ -280,6 +281,7 @@ func retrievingTask(c *Coordinator, worker *AWorker) { //worker disabled
 		reduceTask.WorkerId = -1
 		reduceTask.lock.Unlock()
 	}
+	//todo worker.reset()
 	worker.TaskBeginTime = time.Time{}
 	worker.Filename = ""
 

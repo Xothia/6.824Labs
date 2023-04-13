@@ -117,23 +117,24 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			buket[i] = append(buket[i], kv)
 		}
 		for i := 0; i < nReduce; i++ { //sort and write file
-			sort.Sort(buket[i])                       //sort
-			buket[i] = earlyReduce(buket[i], reducef) //call reduce on one buket
+			sort.Sort(buket[i])                  //sort
+			buket[i] = Reduce(buket[i], reducef) //call reduce on one buket
 			//write file
 			outputFilename = "mr-" + filename + "-" + strconv.Itoa(i)
-			tempFilename := strconv.Itoa(time.Now().Nanosecond())
-
-			//midFile, _ := os.Create(outputFilename)
-			midFile, _ := os.Create(tempFilename)
-			enc := json.NewEncoder(midFile)
-			for _, kv := range buket[i] {
-				err := enc.Encode(&kv)
-				if err != nil {
-					log.Fatal("write file wrong:" + err.Error())
-				}
-			}
-			midFile.Close()
-			os.Rename(tempFilename, outputFilename)
+			writeFile(buket[i], outputFilename)
+			//tempFilename := strconv.Itoa(time.Now().Nanosecond())
+			//
+			////midFile, _ := os.Create(outputFilename)
+			//midFile, _ := os.Create(tempFilename)
+			//enc := json.NewEncoder(midFile)
+			//for _, kv := range buket[i] {
+			//	err := enc.Encode(&kv)
+			//	if err != nil {
+			//		log.Fatal("write file wrong:" + err.Error())
+			//	}
+			//}
+			//midFile.Close()
+			//os.Rename(tempFilename, outputFilename)
 		}
 		outputFilename = "mr-" + filename + "-*"
 
@@ -145,13 +146,26 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 		if err != nil {
 			log.Fatal("filepath.Glob(filename) went wrong.")
 		}
-		log.Print("processing reduce task.filename:")
-		for _, str := range taskFilenames {
-			log.Print(str)
+		log.Println("processing reduce task.filename:" + filename)
+		//read file
+		midKVS := make(KVSlice, 0)
+		for _, filename := range taskFilenames {
+			//read file
+			amidFile, _ := os.Open(filename)
+			dec := json.NewDecoder(amidFile)
+			var kvs KVSlice
+			_ = dec.Decode(&kvs)
+			midKVS = append(midKVS, kvs...)
 		}
-		log.Println()
+		midKVS = Reduce(midKVS, reducef) //call reduce func
 
-		outputFilename = filename
+		//build output filename
+		runes := []rune(filename)
+		lastChar := string(runes[len(runes)-1])
+		opFilename := "mr-out-" + lastChar
+		writeFile(midKVS, opFilename)
+
+		outputFilename = opFilename
 	case 203:
 		//No un-dispatched tasks
 		log.Println("No un-dispatched tasks.")
@@ -163,7 +177,22 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 	return outputFilename
 }
 
-func earlyReduce(kvs KVSlice, reducef func(string, []string) string) KVSlice {
+func writeFile(content KVSlice, outputFilename string) {
+	//write file
+	tempFilename := strconv.Itoa(time.Now().Nanosecond())
+	midFile, _ := os.Create(tempFilename)
+	enc := json.NewEncoder(midFile)
+	for _, kv := range content {
+		err := enc.Encode(&kv)
+		if err != nil {
+			log.Fatal("write file wrong:" + err.Error())
+		}
+	}
+	_ = midFile.Close()
+	_ = os.Rename(tempFilename, outputFilename)
+}
+
+func Reduce(kvs KVSlice, reducef func(string, []string) string) KVSlice {
 	res := make(KVSlice, 0)
 	// call Reduce on each distinct key in kvs,
 	i := 0
