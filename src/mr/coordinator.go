@@ -2,6 +2,7 @@ package mr
 
 import (
 	"log"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -51,11 +52,15 @@ type Coordinator struct {
 	Workers     map[int]*AWorker //worker id -> worker
 	WorkersLock sync.RWMutex
 
-	nReduce          int  //number of reduce tasks to use.
-	allMapTaskIsDone bool //
-	aliveDetectionT  int  //seconds
-	tleDetectionT    int  //seconds
-	tleLimit         int  //seconds
+	nReduce             int  //number of reduce tasks to use.
+	allMapTaskIsDone    bool //
+	allReduceTaskIsDone bool //
+	aliveDetectionT     int  //seconds
+	tleDetectionT       int  //seconds
+	tleLimit            int  //seconds
+
+	switchToReduceTask     bool //add reduce task to ReduceTasks
+	switchToReduceTaskLock sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -88,7 +93,7 @@ func (c *Coordinator) ReqTask(workerId int, reply *AskForTaskReply) error {
 
 	c.MapTasksLock.RLock()
 	c.ReduceTasksLock.RLock()
-	if len(c.MapTasks) != 0 { //map tasks not done yet
+	if !c.allMapTaskIsDone { //map tasks not done yet
 		c.ReduceTasksLock.RUnlock()
 		reply.Status = 203
 
@@ -116,34 +121,37 @@ func (c *Coordinator) ReqTask(workerId int, reply *AskForTaskReply) error {
 		}
 		c.MapTasksLock.RUnlock()
 
-	} else if len(c.ReduceTasks) != 0 { //reduce tasks not done yet
+	} else if !c.allReduceTaskIsDone { //reduce tasks not done yet
 		c.MapTasksLock.RUnlock()
 		reply.Status = 203
-		for filename, reduceTask := range c.ReduceTasks {
-			reduceTask.lock.Lock()
-			if !reduceTask.IsDispatched {
-				//c.ReduceTasksLock.RUnlock()
-				//assign reduce task
-				reply.Status = 202
-				reply.Filename = filename
-				reply.NReduce = c.nReduce
+		if c.switchToReduceTask { //switch is done
+			for filename, reduceTask := range c.ReduceTasks { //assign task
+				reduceTask.lock.Lock()
+				if !reduceTask.IsDispatched {
+					//c.ReduceTasksLock.RUnlock()
+					//assign reduce task
+					reply.Status = 202
+					reply.Filename = filename
+					reply.NReduce = c.nReduce
 
-				reduceTask.IsDispatched = true
-				reduceTask.WorkerId = workerId
+					reduceTask.IsDispatched = true
+					reduceTask.WorkerId = workerId
+					reduceTask.lock.Unlock()
+
+					c.WorkersLock.RLock()
+					aWorker := c.Workers[workerId]
+					c.WorkersLock.RUnlock()
+					aWorker.TaskBeginTime = time.Now()
+					aWorker.Filename = filename
+					break
+				}
 				reduceTask.lock.Unlock()
-
-				c.WorkersLock.RLock()
-				aWorker := c.Workers[workerId]
-				c.WorkersLock.RUnlock()
-				aWorker.TaskBeginTime = time.Now()
-				aWorker.Filename = filename
-				break
 			}
-			reduceTask.lock.Unlock()
 		}
 		c.ReduceTasksLock.RUnlock()
 
 	} else { //all work done
+
 		reply.Status = 204
 		c.MapTasksLock.RUnlock()
 		c.ReduceTasksLock.RUnlock()
@@ -160,14 +168,37 @@ func (c *Coordinator) MapTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
 	if worker, ok := c.Workers[arg.WorkerId]; ok && len(worker.Filename) != 0 {
 		filename := worker.Filename
 		c.deleteMapTask(filename)
-		c.ReduceTasksLock.Lock()
-		r := new(ReduceTask)
-		c.ReduceTasks[arg.OutputFilename] = r
-		c.ReduceTasksLock.Unlock()
+
+		//c.ReduceTasksLock.Lock()
+		//r := new(ReduceTask)
+		//c.ReduceTasks[arg.OutputFilename] = r
+		//c.ReduceTasksLock.Unlock()
 	} else {
 		reply.Status = 301 //caller is a dead or tle worker
 	}
 	c.WorkersLock.RUnlock()
+
+	c.MapTasksLock.RLock()
+	if len(c.MapTasks) == 0 { //all done
+		c.allMapTaskIsDone = true
+	}
+	c.MapTasksLock.RUnlock()
+	if c.allMapTaskIsDone && !c.switchToReduceTask && !c.allReduceTaskIsDone {
+		c.switchToReduceTaskLock.Lock()
+		//double check
+		if !c.switchToReduceTask {
+			c.ReduceTasksLock.Lock()
+			for i := 0; i < c.nReduce; i++ {
+				reduceTaskFilename := "mr-pg-*-" + strconv.Itoa(i)
+				r := new(ReduceTask)
+				c.ReduceTasks[reduceTaskFilename] = r
+			}
+			c.ReduceTasksLock.Unlock()
+			c.switchToReduceTask = true
+		}
+		c.switchToReduceTaskLock.Unlock()
+	}
+
 	return nil
 }
 
@@ -291,14 +322,9 @@ func (c *Coordinator) Done() bool {
 
 	// Your code here.
 	done := false
-	c.MapTasksLock.RLock()
-	c.ReduceTasksLock.RLock()
-	if len(c.MapTasks) == 0 && len(c.ReduceTasks) == 0 {
+	if c.allMapTaskIsDone && c.allReduceTaskIsDone {
 		done = true
 	}
-	c.MapTasksLock.RUnlock()
-	c.ReduceTasksLock.RUnlock()
-
 	return done
 }
 

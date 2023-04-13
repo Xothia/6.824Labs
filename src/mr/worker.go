@@ -134,7 +134,6 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			}
 			midFile.Close()
 			os.Rename(tempFilename, outputFilename)
-			//	TODO rename after complete write
 		}
 		outputFilename = "mr-" + filename + "-*"
 
@@ -150,7 +149,7 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 	case 204: //all work done
 		log.Println("all work done.")
 	}
-	time.Sleep(7 * time.Second)
+	time.Sleep(3 * time.Second)
 	return outputFilename
 }
 
