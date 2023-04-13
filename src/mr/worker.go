@@ -121,7 +121,10 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			buket[i] = earlyReduce(buket[i], reducef) //call reduce on one buket
 			//write file
 			outputFilename = "mr-" + filename + "-" + strconv.Itoa(i)
-			midFile, _ := os.Create(outputFilename)
+			tempFilename := strconv.Itoa(time.Now().Nanosecond())
+
+			//midFile, _ := os.Create(outputFilename)
+			midFile, _ := os.Create(tempFilename)
 			enc := json.NewEncoder(midFile)
 			for _, kv := range buket[i] {
 				err := enc.Encode(&kv)
@@ -129,6 +132,8 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 					log.Fatal("write file wrong:" + err.Error())
 				}
 			}
+			midFile.Close()
+			os.Rename(tempFilename, outputFilename)
 			//	TODO rename after complete write
 		}
 		outputFilename = "mr-" + filename + "-*"
