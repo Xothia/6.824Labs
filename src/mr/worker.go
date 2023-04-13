@@ -102,7 +102,7 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 		if err != nil {
 			log.Fatalf("cannot read %v", filename)
 		}
-		file.Close()
+		_ = file.Close()
 		kva := mapf(filename, string(content))
 		intermediate = append(intermediate, kva...)
 
@@ -117,8 +117,8 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			buket[i] = append(buket[i], kv)
 		}
 		for i := 0; i < nReduce; i++ { //sort and write file
-			sort.Sort(buket[i])                  //sort
-			buket[i] = Reduce(buket[i], reducef) //call reduce on one buket
+			sort.Sort(buket[i])                  //sort FIRST
+			buket[i] = Reduce(buket[i], reducef) //THEN call reduce on one buket
 			//write file
 			outputFilename = "mr-" + filename + "-" + strconv.Itoa(i)
 			writeMidFile(buket[i], outputFilename)
@@ -152,8 +152,8 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 		}
 		log.Println("midKVS len:" + strconv.Itoa(midKVS.Len()))
 		//todo fix bus: cant write
+		sort.Sort(midKVS)                //sort first!
 		midKVS = Reduce(midKVS, reducef) //call reduce func
-		sort.Sort(midKVS)                //sort
 		//build output filename
 		runes := []rune(filename)
 		lastChar := string(runes[len(runes)-1])
@@ -201,6 +201,7 @@ func writeMidFile(content KVSlice, outputFilename string) {
 }
 
 func Reduce(kvs KVSlice, reducef func(string, []string) string) KVSlice {
+	//reduce a SORTED KVSlice
 	res := make(KVSlice, 0)
 	// call Reduce on each distinct key in kvs,
 	i := 0
