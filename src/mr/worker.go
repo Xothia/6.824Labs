@@ -134,16 +134,20 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			log.Fatal("filepath.Glob(filename) went wrong.")
 		}
 		log.Println("processing reduce task.filename:" + filename)
-		//todo check weather read or not
+		//todo cant read!
 		//read file
 		midKVS := make(KVSlice, 0)
 		for _, filename := range taskFilenames {
 			//read file
 			amidFile, _ := os.Open(filename)
 			dec := json.NewDecoder(amidFile)
-			var kvs KVSlice
-			_ = dec.Decode(&kvs)
-			midKVS = append(midKVS, kvs...)
+			for {
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					break
+				}
+				midKVS = append(midKVS, kv)
+			}
 			_ = amidFile.Close()
 		}
 		log.Println("midKVS len:" + strconv.Itoa(midKVS.Len()))
