@@ -144,13 +144,13 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			_ = dec.Decode(&kvs)
 			midKVS = append(midKVS, kvs...)
 		}
+		//todo fix bus: cant write
 		midKVS = Reduce(midKVS, reducef) //call reduce func
 		sort.Sort(midKVS)                //sort
 		//build output filename
 		runes := []rune(filename)
 		lastChar := string(runes[len(runes)-1])
 		opFilename := "mr-out-" + lastChar
-		//todo write file with %v %v format
 		writeOutFile(midKVS, opFilename)
 
 		outputFilename = opFilename
