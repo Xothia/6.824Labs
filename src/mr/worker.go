@@ -114,14 +114,16 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			i := ihash(kv.Key) % nReduce
 			buket[i] = append(buket[i], kv)
 		}
+		randFilename := strconv.Itoa(time.Now().Nanosecond())
 		for i := 0; i < nReduce; i++ { //sort and write file
 			sort.Sort(buket[i]) //sort FIRST
 			//buket[i] = Reduce(buket[i], reducef) //THEN call reduce on one buket
 			//write file
-			outputFilename = "mr-" + filename + "-" + strconv.Itoa(i)
+
+			outputFilename = "mr-" + randFilename + "-" + strconv.Itoa(i)
 			writeMidFile(buket[i], outputFilename)
 		}
-		outputFilename = "mr-" + filename + "-*"
+		outputFilename = "mr-" + randFilename + "-*"
 
 	case 202:
 		//Reduce Task: put the output of the X'th reduce task in the file mr-out-X.
@@ -175,7 +177,10 @@ func writeOutFile(content KVSlice, outputFilename string) {
 		}
 	}
 	_ = midFile.Close()
-	_ = os.Rename(tempFilename, outputFilename)
+	err := os.Rename(tempFilename, outputFilename)
+	if err != nil {
+		log.Fatalln("writeOutFile can not rename")
+	}
 }
 
 func writeMidFile(content KVSlice, outputFilename string) {
@@ -190,7 +195,10 @@ func writeMidFile(content KVSlice, outputFilename string) {
 		}
 	}
 	_ = midFile.Close()
-	_ = os.Rename(tempFilename, outputFilename)
+	err := os.Rename(tempFilename, outputFilename)
+	if err != nil {
+		log.Fatalln("writeMidFile can not rename")
+	}
 }
 
 func Reduce(kvs KVSlice, reducef func(string, []string) string) KVSlice {
