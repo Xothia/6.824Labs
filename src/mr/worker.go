@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"time"
@@ -89,7 +90,6 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 		//the argument that main/mrcoordinator.go passes to MakeCoordinator().
 		//Each mapper should create nReduce intermediate files for consumption
 		//by the reduce tasks.
-		//filepath.Glob
 		log.Println("processing map task.filename:" + filename)
 
 		//read file
@@ -140,7 +140,17 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 	case 202:
 		//Reduce Task
 		// put the output of the X'th reduce task in the file mr-out-X.
-		log.Println("processing reduce task.filename:" + filename)
+		//filepath.Glob
+		taskFilenames, err := filepath.Glob(filename)
+		if err != nil {
+			log.Fatal("filepath.Glob(filename) went wrong.")
+		}
+		log.Print("processing reduce task.filename:")
+		for _, str := range taskFilenames {
+			log.Print(str)
+		}
+		log.Println()
+
 		outputFilename = filename
 	case 203:
 		//No un-dispatched tasks
