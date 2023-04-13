@@ -134,6 +134,7 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			log.Fatal("filepath.Glob(filename) went wrong.")
 		}
 		log.Println("processing reduce task.filename:" + filename)
+		//todo check weather read or not
 		//read file
 		midKVS := make(KVSlice, 0)
 		for _, filename := range taskFilenames {
@@ -143,7 +144,9 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			var kvs KVSlice
 			_ = dec.Decode(&kvs)
 			midKVS = append(midKVS, kvs...)
+			_ = amidFile.Close()
 		}
+		log.Println("midKVS len:" + strconv.Itoa(midKVS.Len()))
 		//todo fix bus: cant write
 		midKVS = Reduce(midKVS, reducef) //call reduce func
 		sort.Sort(midKVS)                //sort

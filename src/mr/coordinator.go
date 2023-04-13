@@ -40,7 +40,6 @@ type AWorker struct {
 }
 
 type Coordinator struct {
-	// Your definitions here.
 	//remember to lock data
 	//map tasks
 	MapTasks     map[string]*MapTask //Filename -> MapTask
