@@ -64,14 +64,6 @@ type Coordinator struct {
 
 // Your code here -- RPC handlers for the worker to call.
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//func (c *Coordinator) Example(args *ExampleArgs, reply *Reply) error {
-//	reply.Y = args.X + 1
-//	return nil
-//}
-
 // RegisterWorker workers call this func to register
 func (c *Coordinator) RegisterWorker(workerId int, reply *Reply) error {
 	reply.Status = 200
@@ -166,23 +158,21 @@ func (c *Coordinator) MapTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
 	c.WorkersLock.RLock()
 	//delete complete map task from deleteMapTask and reset aWorker
 	if worker, ok := c.Workers[arg.WorkerId]; ok && len(worker.Filename) != 0 {
-		filename := worker.Filename
-		c.deleteMapTask(filename) //delete task
-		//reset worker
-		//todo worker.reset()
-		worker.Filename = ""
-		worker.TaskBeginTime = time.Time{}
+		c.deleteMapTask(worker.Filename) //delete task
+		worker.reset()                   //reset worker
 	} else {
 		reply.Status = 301 //caller is a dead or tle worker
 	}
 	c.WorkersLock.RUnlock()
 
+	//check map task is done or not
 	c.MapTasksLock.RLock()
 	if len(c.MapTasks) == 0 { //all done
 		c.allMapTaskIsDone = true
 	}
-	//when map all done switchToReduceTask
 	c.MapTasksLock.RUnlock()
+
+	//when map all done switchToReduceTask
 	if c.allMapTaskIsDone && !c.switchToReduceTask && !c.allReduceTaskIsDone {
 		c.switchToReduceTaskLock.Lock()
 		//double check
@@ -203,7 +193,24 @@ func (c *Coordinator) MapTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
 }
 
 func (c *Coordinator) ReduceTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
-	//TODO reduce all done; delete reduce task?;
+	//TODO reduce all done; delete reduce task?;what if a tle worker call this function?;what if multi entry
+	reply.Status = 200
+	c.WorkersLock.RLock()
+	if worker, ok := c.Workers[arg.WorkerId]; ok && len(worker.Filename) != 0 {
+		c.deleteReduceTask(worker.Filename)
+		worker.reset()
+	} else {
+		reply.Status = 301 //caller is a dead or tle worker
+	}
+	c.WorkersLock.RUnlock()
+
+	//check reduce task is done or not
+	c.ReduceTasksLock.RLock()
+	if len(c.ReduceTasks) == 0 { //all done
+		c.allReduceTaskIsDone = true
+	}
+	c.ReduceTasksLock.RUnlock()
+
 	return nil
 }
 
@@ -280,10 +287,7 @@ func retrievingTask(c *Coordinator, worker *AWorker) { //worker disabled
 		reduceTask.WorkerId = -1
 		reduceTask.lock.Unlock()
 	}
-	//todo worker.reset()
-	worker.TaskBeginTime = time.Time{}
-	worker.Filename = ""
-
+	worker.reset()
 }
 
 func (c *Coordinator) deleteWorker(workerId int) {
@@ -345,7 +349,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.nReduce = nReduce
 
 	//init Files
-	filenames := os.Args[1:]
+	//filenames := os.Args[1:]
+	filenames := files
 	for _, name := range filenames {
 		c.MapTasks[name] = new(MapTask)
 	}
@@ -356,4 +361,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// My code end.
 	c.server()
 	return c
+}
+
+func (w *AWorker) reset() {
+	w.Filename = ""
+	w.TaskBeginTime = time.Time{}
 }

@@ -60,14 +60,12 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		switch reply.Status {
 		case 201: //map task done
-			callMapTaskDone(TaskDoneReqArgs{
-				WorkerId:       workerId,
-				OutputFilename: outputFilename,
-			})
+			callMapTaskDone(TaskDoneReqArgs{workerId, outputFilename})
 		case 202: //reduce task done
-
+			callReduceTaskDone(TaskDoneReqArgs{workerId, outputFilename})
 		case 204: //all work done.
 			break
+		case 301: //caller is a dead or tle worker
 		}
 
 	}
@@ -134,7 +132,6 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			log.Fatal("filepath.Glob(filename) went wrong.")
 		}
 		log.Println("processing reduce task.filename:" + filename)
-		//todo cant read!
 		//read file
 		midKVS := make(KVSlice, 0)
 		for _, filename := range taskFilenames {
@@ -150,8 +147,6 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			}
 			_ = amidFile.Close()
 		}
-		log.Println("midKVS len:" + strconv.Itoa(midKVS.Len()))
-		//todo fix bus: cant write
 		sort.Sort(midKVS)                //sort first!
 		midKVS = Reduce(midKVS, reducef) //call reduce func
 		//build output filename
@@ -223,6 +218,17 @@ func Reduce(kvs KVSlice, reducef func(string, []string) string) KVSlice {
 	return res
 }
 
+func callReduceTaskDone(args TaskDoneReqArgs) *Reply {
+	reply := new(Reply)
+	ok := call("Coordinator.ReduceTaskDone", args, reply)
+	if !ok {
+		log.Println("callReduceTaskDone failed!")
+	} else {
+		//log.Println("Worker get a task:" + reply.Data)
+	}
+	return reply
+}
+
 func callMapTaskDone(args TaskDoneReqArgs) *Reply {
 	reply := new(Reply)
 	ok := call("Coordinator.MapTaskDone", args, reply)
@@ -238,7 +244,7 @@ func askForTask(workerId int) *AskForTaskReply {
 	reply := new(AskForTaskReply)
 	ok := call("Coordinator.ReqTask", workerId, reply)
 	if !ok {
-		log.Println("Get task failed!")
+		log.Fatalln("Get task failed!")
 	} else {
 		//log.Println("Worker get a task:" + reply.Data)
 	}
@@ -270,23 +276,23 @@ func imAlive(workerId int, period int) {
 
 // CallExample example function to show how to make an RPC call to the coordinator.
 //
-// the RPC argument and reply types are defined in rpc.go.
-func CallExample(workerId int) {
-
-	reply := new(Reply)
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.ImAlive", workerId, reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("worker recive reply ImAlive:%d\n", reply.Status)
-	} else {
-		fmt.Printf("call failed!\n")
-	}
-}
+//// the RPC argument and reply types are defined in rpc.go.
+//func CallExample(workerId int) {
+//
+//	reply := new(Reply)
+//
+//	// send the RPC request, wait for the reply.
+//	// the "Coordinator.Example" tells the
+//	// receiving server that we'd like to call
+//	// the Example() method of struct Coordinator.
+//	ok := call("Coordinator.ImAlive", workerId, reply)
+//	if ok {
+//		// reply.Y should be 100.
+//		fmt.Printf("worker recive reply ImAlive:%d\n", reply.Status)
+//	} else {
+//		fmt.Printf("call failed!\n")
+//	}
+//}
 
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
