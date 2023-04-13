@@ -121,20 +121,7 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			buket[i] = Reduce(buket[i], reducef) //call reduce on one buket
 			//write file
 			outputFilename = "mr-" + filename + "-" + strconv.Itoa(i)
-			writeFile(buket[i], outputFilename)
-			//tempFilename := strconv.Itoa(time.Now().Nanosecond())
-			//
-			////midFile, _ := os.Create(outputFilename)
-			//midFile, _ := os.Create(tempFilename)
-			//enc := json.NewEncoder(midFile)
-			//for _, kv := range buket[i] {
-			//	err := enc.Encode(&kv)
-			//	if err != nil {
-			//		log.Fatal("write file wrong:" + err.Error())
-			//	}
-			//}
-			//midFile.Close()
-			//os.Rename(tempFilename, outputFilename)
+			writeMidFile(buket[i], outputFilename)
 		}
 		outputFilename = "mr-" + filename + "-*"
 
@@ -158,12 +145,13 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			midKVS = append(midKVS, kvs...)
 		}
 		midKVS = Reduce(midKVS, reducef) //call reduce func
-
+		sort.Sort(midKVS)                //sort
 		//build output filename
 		runes := []rune(filename)
 		lastChar := string(runes[len(runes)-1])
 		opFilename := "mr-out-" + lastChar
-		writeFile(midKVS, opFilename)
+		//todo write file with %v %v format
+		writeOutFile(midKVS, opFilename)
 
 		outputFilename = opFilename
 	case 203:
@@ -176,8 +164,21 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 	time.Sleep(3 * time.Second)
 	return outputFilename
 }
+func writeOutFile(content KVSlice, outputFilename string) {
+	//write file with %v %v format
+	tempFilename := strconv.Itoa(time.Now().Nanosecond())
+	midFile, _ := os.Create(tempFilename)
+	for _, kv := range content {
+		_, err := fmt.Fprintf(midFile, "%v %v\n", kv.Key, kv.Value)
+		if err != nil {
+			log.Fatal("write file wrong:" + err.Error())
+		}
+	}
+	_ = midFile.Close()
+	_ = os.Rename(tempFilename, outputFilename)
+}
 
-func writeFile(content KVSlice, outputFilename string) {
+func writeMidFile(content KVSlice, outputFilename string) {
 	//write file
 	tempFilename := strconv.Itoa(time.Now().Nanosecond())
 	midFile, _ := os.Create(tempFilename)
