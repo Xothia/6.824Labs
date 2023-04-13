@@ -11,13 +11,6 @@ import "os"
 import "net/rpc"
 import "net/http"
 
-//需求
-//1.任务超过10秒未完成则重新分配
-//2.当所有map reduce任务完成时要在done返回true
-//3.worker断线需要检测
-//5.worker通过rpc请求一个任务(map或者reduce)
-//6.并发锁！
-
 // MapTask Map Task input files
 type MapTask struct {
 	IsDispatched bool //indicate weather a filename is dispatched
@@ -193,7 +186,6 @@ func (c *Coordinator) MapTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
 }
 
 func (c *Coordinator) ReduceTaskDone(arg TaskDoneReqArgs, reply *Reply) error {
-	//TODO reduce all done; delete reduce task?;what if a tle worker call this function?;what if multi entry
 	reply.Status = 200
 	c.WorkersLock.RLock()
 	if worker, ok := c.Workers[arg.WorkerId]; ok && len(worker.Filename) != 0 {

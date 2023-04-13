@@ -124,9 +124,7 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 		outputFilename = "mr-" + filename + "-*"
 
 	case 202:
-		//Reduce Task
-		// put the output of the X'th reduce task in the file mr-out-X.
-		//filepath.Glob
+		//Reduce Task: put the output of the X'th reduce task in the file mr-out-X.
 		taskFilenames, err := filepath.Glob(filename)
 		if err != nil {
 			log.Fatal("filepath.Glob(filename) went wrong.")
@@ -273,26 +271,6 @@ func imAlive(workerId int, period int) {
 	}
 
 }
-
-// CallExample example function to show how to make an RPC call to the coordinator.
-//
-//// the RPC argument and reply types are defined in rpc.go.
-//func CallExample(workerId int) {
-//
-//	reply := new(Reply)
-//
-//	// send the RPC request, wait for the reply.
-//	// the "Coordinator.Example" tells the
-//	// receiving server that we'd like to call
-//	// the Example() method of struct Coordinator.
-//	ok := call("Coordinator.ImAlive", workerId, reply)
-//	if ok {
-//		// reply.Y should be 100.
-//		fmt.Printf("worker recive reply ImAlive:%d\n", reply.Status)
-//	} else {
-//		fmt.Printf("call failed!\n")
-//	}
-//}
 
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
