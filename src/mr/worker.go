@@ -117,8 +117,8 @@ func processTask(reply *AskForTaskReply, mapf func(string, string) []KeyValue,
 			buket[i] = append(buket[i], kv)
 		}
 		for i := 0; i < nReduce; i++ { //sort and write file
-			sort.Sort(buket[i])                  //sort FIRST
-			buket[i] = Reduce(buket[i], reducef) //THEN call reduce on one buket
+			sort.Sort(buket[i]) //sort FIRST
+			//buket[i] = Reduce(buket[i], reducef) //THEN call reduce on one buket
 			//write file
 			outputFilename = "mr-" + filename + "-" + strconv.Itoa(i)
 			writeMidFile(buket[i], outputFilename)
