@@ -64,8 +64,9 @@ func Worker(mapf func(string, string) []KeyValue,
 		case 202: //reduce task done
 			callReduceTaskDone(TaskDoneReqArgs{workerId, outputFilename})
 		case 204: //all work done.
-			//break
+			continue
 		case 301: //caller is a dead or tle worker
+			continue
 		}
 
 	}
