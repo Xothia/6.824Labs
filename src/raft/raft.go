@@ -78,6 +78,7 @@ type Raft struct {
 	//channels
 	ElectionTimeoutEventChan <-chan time.Time
 	LeaderAliveEventChan     chan bool
+	WinElectionInfoChan      chan bool
 	//State:
 	state string
 	//Persistent state on all servers:
@@ -90,6 +91,8 @@ type Raft struct {
 	//Volatile state on leaders:
 	nextIndex  []int
 	matchIndex []int
+	//other const
+	majorityNum int
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 }
@@ -182,7 +185,11 @@ type AppendEntriesReply struct {
 // AppendEntries Followers will be invoked
 // heartbeat detect
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
-
+	rf.appendEntriesEventHandler(args, reply)
+	//if rf.state==CANDIDATE{
+	//
+	//}
+	//AppendEntries tells leader still alive then reset the electionTimeoutTicker
 	return nil
 }
 
@@ -285,6 +292,17 @@ func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
 }
+func (rf *Raft) heartBeatService() {
+	for rf.killed() == false {
+		select {
+		case <-rf.WinElectionInfoChan:
+			for rf.state == LEADER {
+				//todo send heartbeat periodically
+
+			}
+		}
+	}
+}
 
 // Check if a leader election should be started.
 // The tester requires your Raft to elect a new leader within five seconds of the failure of the old leader
@@ -294,12 +312,6 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		// Your code here (2A)
 		select {
-		case <-rf.LeaderAliveEventChan:
-
-			//if rf.state==CANDIDATE{
-			//
-			//}
-			//AppendEntries tells leader still alive then reset the electionTimeoutTicker
 		case <-rf.ElectionTimeoutEventChan:
 			//todo
 			rf.electionTimeoutEventHandler()
@@ -307,67 +319,102 @@ func (rf *Raft) ticker() {
 
 	}
 }
-func (rf *Raft) appendEntriesEventHandler() {
+func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	if rf.state == CANDIDATE {
 		//todo handle hb
+		// IfAppendEntries RPC received from new leader: convert to follower
 		//If the leader’s term (included in its RPC) is at least
 		//as large as the candidate’s current term, then the candidate
 		//recognizes the leader as legitimate and returns to follower
 		//state.
+		if args.Entries == nil { //a heartbeat signal
+			if rf.currentTerm > args.Term { //hb from an old leader
+				return
+			}
+			// there is a new leader
+			rf.mu.Lock()
+			rf.currentTerm = args.Term
+			rf.transferTo(FOLLOWER)
+			rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
+			rf.mu.Unlock()
+		} else {
+
+		}
 	} else if rf.state == FOLLOWER {
+		//todo check term or other things
 		rf.resetTickerWithLock(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
 	} else if rf.state == LEADER {
 
 	}
 }
 func (rf *Raft) electionTimeoutEventHandler() {
+	//better to take a method lock to prevent reentry this method
+	rf.mu.Lock()
 	if rf.state == LEADER { //if leader then return
+		rf.mu.Unlock()
 		return
 	}
 	//start election
-	rf.mu.Lock()
-	rf.convertTo(CANDIDATE)
+	rf.transferTo(CANDIDATE)
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
+	replyChan := rf.sendRequestVoteToPeers()
+	currentTerm := rf.currentTerm
 	rf.mu.Unlock()
+	//what if a leader send hb when invoke this method 1. this is out of term 2. old leader 3. others win the election
+	//UNSAFE BEGIN
+	voteNum, totalNum := 0, 0
+	for reply := range replyChan { //count the votes
+		totalNum++
+		if reply != nil {
+			if reply.VoteGranted { //get vote
+				voteNum++
+			} else if reply.Term > currentTerm { //do not get the vote. if left behind then transfer to follower
+				rf.mu.Lock()
+				if rf.state == CANDIDATE && reply.Term > rf.currentTerm { // candidate transfer to follower
+					rf.transferTo(FOLLOWER)
+					rf.currentTerm = reply.Term
+					currentTerm = reply.Term
+					rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
+				}
+				rf.mu.Unlock()
+			}
+		}
+		if totalNum >= len(rf.peers) { //all calls return
+			break
+		}
+	}
+	//UNSAFE END
+	rf.mu.Lock()
+	if rf.state == CANDIDATE && voteNum >= rf.majorityNum { //become leader: win the election
+		//todo no-op append entry
+		rf.transferTo(LEADER)
+		rf.WinElectionInfoChan <- true
+	}
+	rf.mu.Unlock()
+}
 
-	//TODO Send RequestVote RPCs to all other servers
-	// If votes received from majority of servers: become leader
-	// IfAppendEntries RPC received from new leader: convert to follower
-	// If election timeout elapses: start new election
-	//what if a leader send hb when invoke this method
-	majorityNum := (len(rf.peers) + 1) / 2
-	replyChan := make(chan bool, majorityNum)
+func (rf *Raft) sendRequestVoteToPeers() chan *RequestVoteReply {
+	replyChan := make(chan *RequestVoteReply, rf.majorityNum)
+
 	requestVoteArgs := rf.makeRequestVoteArgForCandidate()
 	for id := range rf.peers {
-		//Call() is guaranteed to return
-		go func(peerId int) {
-			reply := RequestVoteReply{}
-			ok := rf.sendRequestVote(peerId, requestVoteArgs, &reply)
-			if ok && reply.VoteGranted {
-				replyChan <- true
-			} else {
-				replyChan <- false
-			}
-		}(id)
-	}
-	voteNum, totalNum := 0, 0
-	for vote := range replyChan {
-		totalNum++
-		if vote {
-			voteNum++
-		}
-
-		if voteNum >= majorityNum {
-
-		} else if totalNum >= len(rf.peers) {
-			//
-
+		if id != rf.me { //except me
+			go func(peerId int) {
+				reply := RequestVoteReply{}
+				ok := rf.sendRequestVote(peerId, requestVoteArgs, &reply)
+				if ok {
+					replyChan <- &reply
+				} else {
+					replyChan <- nil
+				}
+			}(id)
 		}
 	}
-
+	return replyChan
 }
+
 func (rf *Raft) makeRequestVoteArgForCandidate() *RequestVoteArgs {
 	rf.mu.RLock()
 	index, lastLog := rf.getLastLogWithoutLock()
@@ -386,7 +433,7 @@ func (rf *Raft) makeNoOpEntry() Entry {
 		Command: nil,
 	}
 }
-func (rf *Raft) convertTo(t string) {
+func (rf *Raft) transferTo(t string) {
 	if t != CANDIDATE && t != FOLLOWER && t != LEADER {
 		return
 	}
@@ -431,6 +478,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//channels
 	rf.ElectionTimeoutEventChan = rf.electionTimeoutTicker.C
 	rf.LeaderAliveEventChan = make(chan bool, 1)
+	rf.WinElectionInfoChan = make(chan bool, 1)
 	//State:
 	rf.state = FOLLOWER
 	//Persistent state on all servers:
@@ -448,6 +496,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.nextIndex[i] = len(rf.log)
 	}
 	rf.matchIndex = make([]int, len(rf.peers)) //initialized to 0
+	//other const
+	rf.majorityNum = (len(rf.peers) + 1) / 2
 
 	// initialize from state persisted before a crash
 	//rf.readPersist(persister.ReadRaftState())
