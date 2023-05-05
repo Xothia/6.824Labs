@@ -18,9 +18,9 @@ package raft
 //
 
 import (
-	"log"
 	//	"bytes"
 	"math/rand"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -102,11 +102,13 @@ type Raft struct {
 // GetState return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	//todo
 	var term int
 	var isleader bool
 	// Your code here (2A).
-
+	rf.mu.RLock()
+	term = rf.currentTerm
+	isleader = rf.isLeader()
+	rf.mu.RUnlock()
 	return term, isleader
 }
 
@@ -271,7 +273,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
-
+	isLeader = rf.isLeader()
 	// Your code here (2B).
 
 	return index, term, isLeader
@@ -300,15 +302,34 @@ func (rf *Raft) leaderRoutines() {
 	for {
 		select {
 		case <-rf.TransferLeaderInfoChan: //server becomes leader begin to do leader routines
+			DPrintf(strconv.Itoa(rf.me) + ":LEADER ROUTINES STARTED")
 			for rf.state == LEADER && rf.killed() == false { //if not be killed and still leader then
 				//todo sends hb
 				rf.mu.RLock()
 				args := rf.makeVoidAppendEntriesArgForLeaderWithoutLock()
-				args.Entries = rf.log
+				//args.Entries = rf.log
 				rf.mu.RUnlock()
 				rf.sendAppendEntriesToPeersWithoutLock(args, rf.AppendEntriesReplyChan)
 				time.Sleep(time.Duration(HEARTBEAT) * time.Millisecond)
 			}
+		}
+	}
+}
+func (rf *Raft) appendEntriesReplyHandler(replyChan chan *AppendEntriesReply) {
+	DPrintf(strconv.Itoa(rf.me) + ":AE REPLY HANDLER STARTED")
+	for reply := range replyChan {
+
+		if rf.killed() {
+			break
+		}
+		if !rf.isLeader() {
+			continue
+		}
+		//todo handle appendEntries reply
+		if reply.Term > rf.currentTerm {
+			rf.mu.Lock()
+			rf.transferToFollower(reply.Term)
+			rf.mu.Unlock()
 		}
 	}
 }
@@ -318,6 +339,8 @@ func (rf *Raft) leaderRoutines() {
 // you will have to use an election timeout larger than the paper's 150 to 300 milliseconds,
 // pause for a random amount of time between ELEC_TOUT_LOBOUND and ELEC_TOUT_UPBOUND
 func (rf *Raft) ticker() {
+	DPrintf(strconv.Itoa(rf.me) + ":TICKER STARTED")
+
 	for rf.killed() == false {
 		// Your code here (2A)
 		select {
@@ -338,13 +361,13 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 		//recognizes the leader as legitimate and returns to follower
 		//state.
 		if args.Entries == nil { //a heartbeat signal
-			if rf.currentTerm > args.Term { //hb from an old leader
+			if args.Term < rf.currentTerm { //hb from an old leader
+				reply.Success = false
 				return
 			}
 			// there is a new leader
 			rf.mu.Lock()
-			rf.currentTerm = args.Term
-			rf.transferToFollower()
+			rf.transferToFollower(args.Term)
 			rf.mu.Unlock()
 		} else {
 
@@ -355,6 +378,7 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	} //else if rf.isLeader()
 
 }
+
 func (rf *Raft) electionTimeoutEventHandler() {
 	//better to take a method lock to prevent reentry this method
 	voteReply, originTerm := rf.transferToCandidate()
@@ -381,20 +405,27 @@ func (rf *Raft) transferToLeader() {
 }
 
 func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVoteReply) {
-	//todo
-}
-func (rf *Raft) appendEntriesReplyHandler(replyChan chan *AppendEntriesReply) {
-	for reply := range replyChan {
-		//todo handle reply
-		if rf.killed() {
-			break
-		}
-		if !rf.isLeader() {
-			continue
-		}
-		log.Fatal(reply.Term)
+	//TODO HANDLE REQUEST VOTE
+	if rf.currentTerm > args.Term {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
 	}
+	rf.mu.RLock()
+	votedFor := rf.votedFor
+	//todo diff term voteFor have to be re-init
+	rf.mu.RUnlock()
+	if votedFor == -1 || votedFor == args.CandidateId {
+		// never voted then vote
+		rf.mu.Lock()
+		rf.votedFor = args.CandidateId
+		reply.VoteGranted = true
+		rf.mu.Unlock()
+		return
+	}
+
 }
+
 func (rf *Raft) transferToCandidate() (chan *RequestVoteReply, int) { //return reply and term
 	rf.mu.Lock()
 	if rf.state == LEADER { //if leader then return
@@ -412,7 +443,7 @@ func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply) bool { //may take 
 	voteRes := false
 	oldTerm := rf.currentTerm
 	tempTerm := rf.currentTerm
-	voteNum, totalNum := 0, 0
+	voteNum, totalNum := 1, 1      //include me myself
 	for reply := range replyChan { //count the votes
 		totalNum++
 		if reply == nil {
@@ -423,8 +454,7 @@ func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply) bool { //may take 
 		} else if reply.Term > tempTerm { //left behind then transfer to follower
 			rf.mu.Lock()
 			if rf.isCandidate() && (reply.Term > rf.currentTerm) { // candidate transfer to follower
-				rf.transferToFollower()
-				rf.currentTerm = reply.Term
+				rf.transferToFollower(reply.Term)
 				tempTerm = reply.Term
 			}
 			rf.mu.Unlock()
@@ -439,11 +469,13 @@ func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply) bool { //may take 
 	close(replyChan)
 	return voteRes
 }
-func (rf *Raft) transferToFollower() {
+
+func (rf *Raft) transferToFollower(curTerm int) {
 	rf.state = FOLLOWER
+	rf.currentTerm = curTerm
+	rf.votedFor = -1 //reset votedFor
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
 }
-
 func (rf *Raft) makeVoidAppendEntriesArgForLeaderWithoutLock() *AppendEntriesArgs {
 	return &AppendEntriesArgs{
 		Term:     rf.currentTerm,
