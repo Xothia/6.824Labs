@@ -546,7 +546,7 @@ func (rf *Raft) appendLogWithoutLock(e Entry) {
 	rf.log = append(rf.log, e)
 }
 func (rf *Raft) getLastLogWithoutLock() (int, Entry) {
-	return len(rf.log), rf.log[len(rf.log)] //return index and lastLog
+	return len(rf.log), rf.log[len(rf.log)-1] //return index and lastLog
 }
 func (rf *Raft) isCandidate() bool {
 	return rf.state == CANDIDATE
