@@ -188,13 +188,12 @@ type AppendEntriesReply struct {
 
 // AppendEntries Followers will be invoked
 // heartbeat detect
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.appendEntriesEventHandler(args, reply)
 	//if rf.state==CANDIDATE{
 	//
 	//}
 	//AppendEntries tells leader still alive then reset the electionTimeoutTicker
-	return nil
 }
 
 // RequestVoteArgs
@@ -217,11 +216,10 @@ type RequestVoteReply struct {
 }
 
 // RequestVote example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error {
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	//todo
 	rf.requestVoteEventHandler(args, reply)
-	return nil
 }
 
 // example code to send a RequestVote RPC to a server.
