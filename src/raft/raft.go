@@ -396,6 +396,8 @@ func (rf *Raft) electionTimeoutEventHandler() {
 }
 func (rf *Raft) transferToLeader() {
 	//todo no-op append entry
+	DPrintf(strconv.Itoa(rf.me) + ":TRANSFER TO LEADER")
+
 	rf.mu.Lock()
 	rf.state = LEADER
 	rf.TransferLeaderInfoChan <- true //start leader routine
@@ -425,6 +427,8 @@ func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVot
 }
 
 func (rf *Raft) transferToCandidate() (chan *RequestVoteReply, int) { //return reply and term
+	DPrintf(strconv.Itoa(rf.me) + ":TRANSFER TO CANDIDATE")
+
 	rf.mu.Lock()
 	if rf.state == LEADER { //if leader then return
 		rf.mu.Unlock()
@@ -469,6 +473,7 @@ func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply) bool { //may take 
 }
 
 func (rf *Raft) transferToFollower(curTerm int) {
+	DPrintf(strconv.Itoa(rf.me) + ":TRANSFER TO FOLLOWER")
 	rf.state = FOLLOWER
 	rf.currentTerm = curTerm
 	rf.votedFor = -1 //reset votedFor
