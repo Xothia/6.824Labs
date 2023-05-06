@@ -61,8 +61,9 @@ const (
 	FOLLOWER  = "Follower"
 	// HEARTBEAT The tester requires that the leader send heartbeat RPCs no more than ten times per second.
 	HEARTBEAT         = 113
-	ELEC_TOUT_LOBOUND = HEARTBEAT*2 + 3
+	ELEC_TOUT_LOBOUND = HEARTBEAT*2 + 50
 	ELEC_TOUT_UPBOUND = ELEC_TOUT_LOBOUND * 2
+	RPC_TIMEOUT       = 150
 )
 
 // Raft A Go object implementing a single Raft peer.
@@ -300,9 +301,9 @@ func (rf *Raft) leaderRoutines() {
 	for {
 		select {
 		case <-rf.TransferLeaderInfoChan: //server becomes leader begin to do leader routines
-			DPrintf(strconv.Itoa(rf.me) + ":LEADER ROUTINES STARTED")
 			for rf.state == LEADER && rf.killed() == false { //if not be killed and still leader then
 				//todo sends hb
+				DPrintf("%v %v:SENDS HB TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 				rf.mu.RLock()
 				args := rf.makeVoidAppendEntriesArgForLeaderWithoutLock()
 				//args.Entries = rf.log
@@ -316,19 +317,24 @@ func (rf *Raft) leaderRoutines() {
 func (rf *Raft) appendEntriesReplyHandler(replyChan chan *AppendEntriesReply) {
 	DPrintf(strconv.Itoa(rf.me) + ":AE REPLY HANDLER STARTED")
 	for reply := range replyChan {
-
 		if rf.killed() {
 			break
 		}
 		if !rf.isLeader() {
 			continue
 		}
+		if reply != nil {
+			DPrintf("%v %v:HANDLED A appendEntriesReply,replyTerm:%v, reply:%v", rf.state, rf.me, reply.Term, reply.Success)
+		}
+		DPrintf("%v %v:HANDLED A nil appendEntriesReply, curTerm:%v", rf.state, rf.me, rf.currentTerm)
 		//todo handle appendEntries reply
-		if reply.Term > rf.currentTerm {
+		//reply maybe nil due to network failure
+		if reply != nil && reply.Term > rf.currentTerm {
 			rf.mu.Lock()
 			rf.transferToFollower(reply.Term)
 			rf.mu.Unlock()
 		}
+
 	}
 }
 
@@ -338,54 +344,60 @@ func (rf *Raft) appendEntriesReplyHandler(replyChan chan *AppendEntriesReply) {
 // pause for a random amount of time between ELEC_TOUT_LOBOUND and ELEC_TOUT_UPBOUND
 func (rf *Raft) ticker() {
 	DPrintf(strconv.Itoa(rf.me) + ":TICKER STARTED")
-
+	terminateVoteHandlingChan := make(chan bool, 0)
+	//aVoteHandlingIsProcessing := false
 	for rf.killed() == false {
 		// Your code here (2A)
 		select {
 		case <-rf.ElectionTimeoutEventChan: //handler election timeout event
 			//todo
-			rf.electionTimeoutEventHandler()
+			//if aVoteHandlingIsProcessing {
+			//	terminateVoteHandlingChan <- true
+			//}
+			//aVoteHandlingIsProcessing = true
+			rf.electionTimeoutEventHandler(terminateVoteHandlingChan)
 		}
 
 	}
 }
 func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	//todo handle hb
+	// IfAppendEntries RPC received from new leader: convert to follower
+	//If the leader’s term (included in its RPC) is at least
+	//as large as the candidate’s current term, then the candidate
+	//recognizes the leader as legitimate and returns to follower
+	//state.
+	if args.Entries == nil { //a heartbeat signal
+		DPrintf("%v %v:RECEIVE A HB,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 
-	if rf.isCandidate() || rf.isLeader() {
-		//todo handle hb
-		// IfAppendEntries RPC received from new leader: convert to follower
-		//If the leader’s term (included in its RPC) is at least
-		//as large as the candidate’s current term, then the candidate
-		//recognizes the leader as legitimate and returns to follower
-		//state.
-		if args.Entries == nil { //a heartbeat signal
-			if args.Term < rf.currentTerm { //hb from an old leader
-				reply.Success = false
-				return
-			}
-			// there is a new leader
-			rf.mu.Lock()
-			rf.transferToFollower(args.Term)
-			rf.mu.Unlock()
-		} else {
-
+		if args.Term < rf.currentTerm { //hb from an old leader
+			reply.Term = rf.currentTerm
+			reply.Success = false
+			return
 		}
-	} else if rf.isFollower() {
-		//todo check term or other things
-		rf.resetTickerWithLock(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
-	} //else if rf.isLeader()
+		// there is a new leader
+		rf.mu.Lock()
+		rf.transferToFollower(args.Term)
+		reply.Term = rf.currentTerm
+		reply.Success = true
+		rf.mu.Unlock()
+		return
+	} else {
 
+	}
 }
 
-func (rf *Raft) electionTimeoutEventHandler() {
+func (rf *Raft) electionTimeoutEventHandler(terminateSignal <-chan bool) {
 	//better to take a method lock to prevent reentry this method
 	voteReply, originTerm := rf.transferToCandidate()
 	if voteReply == nil { //server is leader
 		return
 	}
 
-	win := rf.handleVotes(voteReply)
+	win := rf.handleVotes(voteReply, terminateSignal)
 	if !win { //do not win election
+		DPrintf("%v %v:LOSE ELECTION", rf.state, rf.me)
+		rf.votedFor = -1 //reset votedFor
 		return
 	}
 
@@ -396,12 +408,13 @@ func (rf *Raft) electionTimeoutEventHandler() {
 }
 func (rf *Raft) transferToLeader() {
 	//todo no-op append entry
-	DPrintf(strconv.Itoa(rf.me) + ":TRANSFER TO LEADER")
 
 	rf.mu.Lock()
 	rf.state = LEADER
+	rf.votedFor = -1                  //reset votedFor
 	rf.TransferLeaderInfoChan <- true //start leader routine
 	rf.mu.Unlock()
+	DPrintf("%v %v:TRANSFER TO LEADER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 }
 
 func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -423,61 +436,108 @@ func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVot
 		rf.mu.Unlock()
 		return
 	}
-
+	//otherwise
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+	return
 }
 
 func (rf *Raft) transferToCandidate() (chan *RequestVoteReply, int) { //return reply and term
-	DPrintf(strconv.Itoa(rf.me) + ":TRANSFER TO CANDIDATE")
-
 	rf.mu.Lock()
-	if rf.state == LEADER { //if leader then return
+	if rf.state == LEADER || rf.votedFor != -1 { //if leader or VOTED! then return
 		rf.mu.Unlock()
 		return nil, -1
 	}
+	rf.state = CANDIDATE
 	rf.currentTerm++
+	term := rf.currentTerm
 	rf.votedFor = rf.me
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
+	DPrintf("%v %v:TRANSFER TO CANDIDATE. currentTerm:%v", rf.state, rf.me, term)
 	replyChan := rf.sendRequestVoteToPeersWithoutLock()
 	rf.mu.Unlock()
-	return replyChan, rf.currentTerm
+	return replyChan, term
 }
-func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply) bool { //may take some time
+func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply, terminateSignal <-chan bool) bool { //may take some time
+	DPrintf("%v %v:BEGIN HANDLE VOTES, curTerm:%v", rf.state, rf.me, rf.currentTerm)
 	voteRes := false
 	oldTerm := rf.currentTerm
 	tempTerm := rf.currentTerm
-	voteNum, totalNum := 1, 1      //include me myself
-	for reply := range replyChan { //count the votes
-		totalNum++
-		if reply == nil {
-			continue
-		}
-		if reply.VoteGranted { //get vote
-			voteNum++
-		} else if reply.Term > tempTerm { //left behind then transfer to follower
-			rf.mu.Lock()
-			if rf.isCandidate() && (reply.Term > rf.currentTerm) { // candidate transfer to follower
-				rf.transferToFollower(reply.Term)
-				tempTerm = reply.Term
+	voteNum, totalNum := 1, 1 //include me myself
+	/////
+	forEnd := false
+	for !forEnd {
+		select {
+		case reply := <-replyChan: //handle votes
+			totalNum++
+			DPrintf("%v %v:GET 1 VOTE REPLY,totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
+			if reply == nil {
+				DPrintf("%v %v:NIL VOTE(request vote failed),totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
+			} else if reply.VoteGranted { //get vote
+				voteNum++
+				DPrintf("%v %v:GRANTED VOTE,totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
+			} else if reply.Term > tempTerm { //left behind then transfer to follower
+				rf.mu.Lock()
+				if rf.isCandidate() && (reply.Term > rf.currentTerm) { // candidate transfer to follower
+					rf.transferToFollower(reply.Term)
+					tempTerm = reply.Term
+				}
+				rf.mu.Unlock()
 			}
-			rf.mu.Unlock()
-		}
-		if totalNum >= len(rf.peers) { //all calls return
-			break
+
+			if totalNum >= len(rf.peers) || voteNum >= rf.majorityNum { //all calls return or get major vote
+				DPrintf("%v %v:COUNT VOTE OVER,totalNum:%v,voteNum:%v,len(rf.peers):%v", rf.state, rf.me, totalNum, voteNum, len(rf.peers))
+				forEnd = true
+			}
+		case <-terminateSignal: //need to be terminated
+			DPrintf("%v %v:COUNT VOTE IS TERMINATED,totalNum:%v,voteNum:%v,len(rf.peers):%v", rf.state, rf.me, totalNum, voteNum, len(rf.peers))
+			forEnd = true
 		}
 	}
+
 	if rf.isCandidate() && rf.currentTerm == oldTerm && voteNum >= rf.majorityNum { //become leader
 		voteRes = true
 	}
-	close(replyChan)
+	//close(replyChan)
 	return voteRes
+	/////
+
+	//for reply := range replyChan { //count the votes
+	//	totalNum++
+	//	DPrintf("%v %v:GET 1 VOTE REPLY,totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
+	//	if reply == nil {
+	//		DPrintf("%v %v:NIL VOTE(request vote failed),totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
+	//	} else if reply.VoteGranted { //get vote
+	//		voteNum++
+	//		DPrintf("%v %v:GRANTED VOTE,totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
+	//	} else if reply.Term > tempTerm { //left behind then transfer to follower
+	//		rf.mu.Lock()
+	//		if rf.isCandidate() && (reply.Term > rf.currentTerm) { // candidate transfer to follower
+	//			rf.transferToFollower(reply.Term)
+	//			tempTerm = reply.Term
+	//		}
+	//		rf.mu.Unlock()
+	//	}
+	//
+	//	if totalNum >= len(rf.peers) || voteNum >= rf.majorityNum { //all calls return or get major vote
+	//		break
+	//	}
+	//}
+	//
+	//DPrintf("%v %v:COUNT VOTE OVER,totalNum:%v,voteNum:%v,len(rf.peers):%v", rf.state, rf.me, totalNum, voteNum, len(rf.peers))
+	//if rf.isCandidate() && rf.currentTerm == oldTerm && voteNum >= rf.majorityNum { //become leader
+	//	voteRes = true
+	//}
+	////close(replyChan)
+	//return voteRes
 }
 
 func (rf *Raft) transferToFollower(curTerm int) {
-	DPrintf(strconv.Itoa(rf.me) + ":TRANSFER TO FOLLOWER")
 	rf.state = FOLLOWER
 	rf.currentTerm = curTerm
 	rf.votedFor = -1 //reset votedFor
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
+	DPrintf("%v %v:TRANSFER TO FOLLOWER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 }
 func (rf *Raft) makeVoidAppendEntriesArgForLeaderWithoutLock() *AppendEntriesArgs {
 	return &AppendEntriesArgs{
@@ -501,19 +561,38 @@ func (rf *Raft) sendAppendEntriesToPeersWithoutLock(args *AppendEntriesArgs, rep
 		}
 	}
 }
+
 func (rf *Raft) sendRequestVoteToPeersWithoutLock() chan *RequestVoteReply {
 	replyChan := make(chan *RequestVoteReply, rf.majorityNum)
 	requestVoteArgs := rf.makeRequestVoteArgForCandidateWithoutLock()
 	for id := range rf.peers {
+		//DPrintf("id:%v!!!!!!!!!!!!!!!!", id)
+
 		if id != rf.me { //except me
 			go func(peerId int) {
+				var finalReply *RequestVoteReply = nil
+
 				reply := RequestVoteReply{}
-				ok := rf.sendRequestVote(peerId, requestVoteArgs, &reply)
-				if ok {
-					replyChan <- &reply
-				} else {
-					replyChan <- nil
+				before := time.Now()
+				DPrintf("%v %v:RequestVote RPC TO peer:%v peers:%v", rf.state, rf.me, peerId, len(rf.peers))
+				ok := make(chan bool, 1)
+				//defer close(ok)
+				go func(res chan bool) {
+					ok := rf.sendRequestVote(peerId, requestVoteArgs, &reply)
+					res <- ok
+				}(ok)
+				//ok := rf.sendRequestVote(peerId, requestVoteArgs, &reply)
+				select {
+				case res := <-ok:
+					if !res {
+						DPrintf("%v %v:RequestVote RPC TO peer:%v FILED with time:%v", rf.state, rf.me, peerId, time.Now().Sub(before).Milliseconds())
+						break
+					}
+					finalReply = &reply
+				case <-time.After(RPC_TIMEOUT * time.Millisecond):
+					DPrintf("%v %v:RequestVote RPC TO peer:%v TIMEOUT with time:%v", rf.state, rf.me, peerId, time.Now().Sub(before).Milliseconds())
 				}
+				replyChan <- finalReply
 			}(id)
 		}
 	}
