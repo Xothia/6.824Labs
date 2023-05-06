@@ -60,9 +60,9 @@ const (
 	CANDIDATE = "Candidate"
 	FOLLOWER  = "Follower"
 	// HEARTBEAT The tester requires that the leader send heartbeat RPCs no more than ten times per second.
-	HEARTBEAT         = 113
-	ELEC_TOUT_LOBOUND = HEARTBEAT*2 + 50
-	ELEC_TOUT_UPBOUND = ELEC_TOUT_LOBOUND * 2
+	HEARTBEAT         = 103
+	ELEC_TOUT_LOBOUND = HEARTBEAT * 2
+	ELEC_TOUT_UPBOUND = ELEC_TOUT_LOBOUND * 1.5
 	RPC_TIMEOUT       = 150
 )
 
@@ -212,6 +212,7 @@ type RequestVoteArgs struct {
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
+	PeerId      int  //used for test
 	Term        int  //currentTerm, for candidate to update itself
 	VoteGranted bool //true means candidate received vote
 }
@@ -303,8 +304,11 @@ func (rf *Raft) leaderRoutines() {
 		case <-rf.TransferLeaderInfoChan: //server becomes leader begin to do leader routines
 			for rf.state == LEADER && rf.killed() == false { //if not be killed and still leader then
 				//todo sends hb
-				DPrintf("%v %v:SENDS HB TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 				rf.mu.RLock()
+				if rf.state != LEADER { //double check
+					break
+				}
+				DPrintf("%v %v:SENDS HB TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 				args := rf.makeVoidAppendEntriesArgForLeaderWithoutLock()
 				//args.Entries = rf.log
 				rf.mu.RUnlock()
@@ -345,17 +349,25 @@ func (rf *Raft) appendEntriesReplyHandler(replyChan chan *AppendEntriesReply) {
 func (rf *Raft) ticker() {
 	DPrintf(strconv.Itoa(rf.me) + ":TICKER STARTED")
 	terminateVoteHandlingChan := make(chan bool, 0)
-	//aVoteHandlingIsProcessing := false
+	aVoteHandlingIsProcessing := false
+	//flagLock := sync.Mutex{}
 	for rf.killed() == false {
 		// Your code here (2A)
 		select {
 		case <-rf.ElectionTimeoutEventChan: //handler election timeout event
-			//todo
-			//if aVoteHandlingIsProcessing {
-			//	terminateVoteHandlingChan <- true
-			//}
-			//aVoteHandlingIsProcessing = true
-			rf.electionTimeoutEventHandler(terminateVoteHandlingChan)
+			//todo!!!!!!!!!!!!!!
+			if rf.state == LEADER {
+				break
+			}
+			if aVoteHandlingIsProcessing { //candidate transfer to candidate
+				terminateVoteHandlingChan <- true
+			} else {
+				go func() {
+					aVoteHandlingIsProcessing = true
+					aVoteHandlingIsProcessing = !rf.electionTimeoutEventHandler(terminateVoteHandlingChan)
+				}()
+			}
+
 		}
 
 	}
@@ -368,43 +380,48 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	//recognizes the leader as legitimate and returns to follower
 	//state.
 	if args.Entries == nil { //a heartbeat signal
-		DPrintf("%v %v:RECEIVE A HB,curTerm:%v", rf.state, rf.me, rf.currentTerm)
+		DPrintf("%v %v:RECEIVE A HB FROM term:%v,curTerm:%v", rf.state, rf.me, args.Term, rf.currentTerm)
 
 		if args.Term < rf.currentTerm { //hb from an old leader
 			reply.Term = rf.currentTerm
 			reply.Success = false
 			return
+		} else if args.Term >= rf.currentTerm {
+			// there is a new leader
+			rf.mu.Lock()
+			//todo check up-to-date
+			rf.transferToFollower(args.Term)
+			reply.Term = rf.currentTerm
+			reply.Success = true
+			rf.mu.Unlock()
+			return
 		}
-		// there is a new leader
-		rf.mu.Lock()
-		rf.transferToFollower(args.Term)
-		reply.Term = rf.currentTerm
-		reply.Success = true
-		rf.mu.Unlock()
-		return
+
 	} else {
 
 	}
 }
 
-func (rf *Raft) electionTimeoutEventHandler(terminateSignal <-chan bool) {
+// return true indicates function is over
+func (rf *Raft) electionTimeoutEventHandler(terminateSignal <-chan bool) bool {
 	//better to take a method lock to prevent reentry this method
 	voteReply, originTerm := rf.transferToCandidate()
 	if voteReply == nil { //server is leader
-		return
+		return true
 	}
 
 	win := rf.handleVotes(voteReply, terminateSignal)
 	if !win { //do not win election
 		DPrintf("%v %v:LOSE ELECTION", rf.state, rf.me)
 		rf.votedFor = -1 //reset votedFor
-		return
+		return true
 	}
 
 	if rf.currentTerm == originTerm && rf.isCandidate() { //rf did not change (optimistic lock)
 		//todo no-op append entry
 		rf.transferToLeader()
 	}
+	return true
 }
 func (rf *Raft) transferToLeader() {
 	//todo no-op append entry
@@ -419,26 +436,32 @@ func (rf *Raft) transferToLeader() {
 
 func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//TODO HANDLE REQUEST VOTE
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		reply.PeerId = rf.me
 		return
 	}
-	rf.mu.RLock()
+	if rf.currentTerm < args.Term { //discover a bigger term num
+		rf.transferToFollower(args.Term)
+	}
+
 	votedFor := rf.votedFor
-	//todo diff term voteFor have to be re-init
-	rf.mu.RUnlock()
+	//todo have to check id up-to-date
 	if votedFor == -1 || votedFor == args.CandidateId {
 		// never voted then vote
-		rf.mu.Lock()
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
-		rf.mu.Unlock()
+		reply.PeerId = rf.me
 		return
 	}
-	//otherwise
+	//otherwise: voted for other candidate
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
+	reply.PeerId = rf.me
 	return
 }
 
@@ -468,14 +491,19 @@ func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply, terminateSignal <-
 	forEnd := false
 	for !forEnd {
 		select {
+		case <-terminateSignal: //need to be terminated
+			DPrintf("%v %v:COUNT VOTE IS TERMINATED,totalNum:%v,voteNum:%v,len(rf.peers):%v", rf.state, rf.me, totalNum, voteNum, len(rf.peers))
+			forEnd = true
 		case reply := <-replyChan: //handle votes
 			totalNum++
-			DPrintf("%v %v:GET 1 VOTE REPLY,totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
+			if reply != nil {
+				DPrintf("%v %v:GET 1 VOTE REPLY FROM %v,totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, reply.PeerId, totalNum, voteNum, rf.majorityNum)
+			}
 			if reply == nil {
 				DPrintf("%v %v:NIL VOTE(request vote failed),totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
 			} else if reply.VoteGranted { //get vote
 				voteNum++
-				DPrintf("%v %v:GRANTED VOTE,totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
+				DPrintf("%v %v:GRANTED VOTE FROM %v,totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, reply.PeerId, totalNum, voteNum, rf.majorityNum)
 			} else if reply.Term > tempTerm { //left behind then transfer to follower
 				rf.mu.Lock()
 				if rf.isCandidate() && (reply.Term > rf.currentTerm) { // candidate transfer to follower
@@ -489,9 +517,7 @@ func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply, terminateSignal <-
 				DPrintf("%v %v:COUNT VOTE OVER,totalNum:%v,voteNum:%v,len(rf.peers):%v", rf.state, rf.me, totalNum, voteNum, len(rf.peers))
 				forEnd = true
 			}
-		case <-terminateSignal: //need to be terminated
-			DPrintf("%v %v:COUNT VOTE IS TERMINATED,totalNum:%v,voteNum:%v,len(rf.peers):%v", rf.state, rf.me, totalNum, voteNum, len(rf.peers))
-			forEnd = true
+
 		}
 	}
 
@@ -573,7 +599,7 @@ func (rf *Raft) sendRequestVoteToPeersWithoutLock() chan *RequestVoteReply {
 				var finalReply *RequestVoteReply = nil
 
 				reply := RequestVoteReply{}
-				before := time.Now()
+				//before := time.Now()
 				DPrintf("%v %v:RequestVote RPC TO peer:%v peers:%v", rf.state, rf.me, peerId, len(rf.peers))
 				ok := make(chan bool, 1)
 				//defer close(ok)
@@ -585,13 +611,14 @@ func (rf *Raft) sendRequestVoteToPeersWithoutLock() chan *RequestVoteReply {
 				select {
 				case res := <-ok:
 					if !res {
-						DPrintf("%v %v:RequestVote RPC TO peer:%v FILED with time:%v", rf.state, rf.me, peerId, time.Now().Sub(before).Milliseconds())
+						//DPrintf("%v %v:RequestVote RPC TO peer:%v FILED with time:%v", rf.state, rf.me, peerId, time.Now().Sub(before).Milliseconds())
 						break
 					}
 					finalReply = &reply
-				case <-time.After(RPC_TIMEOUT * time.Millisecond):
-					DPrintf("%v %v:RequestVote RPC TO peer:%v TIMEOUT with time:%v", rf.state, rf.me, peerId, time.Now().Sub(before).Milliseconds())
+					//case <-time.After(RPC_TIMEOUT * time.Millisecond): //rpc timeout limit
+					//	DPrintf("%v %v:RequestVote RPC TO peer:%v TIMEOUT with time:%v", rf.state, rf.me, peerId, time.Now().Sub(before).Milliseconds())
 				}
+
 				replyChan <- finalReply
 			}(id)
 		}
