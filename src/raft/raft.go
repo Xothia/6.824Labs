@@ -197,7 +197,6 @@ type AppendEntriesReply struct {
 // heartbeat detect
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.appendEntriesEventHandler(args, reply)
-
 }
 
 // RequestVoteArgs
@@ -319,36 +318,43 @@ func (rf *Raft) sendHeartBeatToPeersWithoutLock() {
 	args := rf.makeVoidAppendEntriesArgForLeaderWithoutLock()
 	rf.sendAppendEntriesToPeersWithoutLock(args, rf.AppendEntriesReplyChan)
 }
+func (rf *Raft) heartBeatService() {
+	for {
+		time.Sleep(time.Duration(HEARTBEAT) * time.Millisecond)
+		rf.mu.RLock()
+		if rf.state != LEADER || rf.killed() { //double check
+			rf.mu.RUnlock()
+			break
+		}
+		rf.sendHeartBeatToPeersWithoutLock()
+		rf.mu.RUnlock()
+	}
+}
+
+func (rf *Raft) newEntryEventHandler() {
+	for rf.state == LEADER && !rf.killed() {
+		select {
+		case <-rf.NewEntryInfoChan: //AEArgsChan
+			rf.mu.RLock()
+			if rf.state != LEADER || rf.killed() { //double check
+				rf.mu.RUnlock()
+				break
+			}
+			DPrintf("%v %v:SENDS NEW ENTRY TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
+			rf.sendHeartBeatToPeersWithoutLock()
+			rf.mu.RUnlock()
+		case <-time.After(time.Duration(HEARTBEAT) * time.Millisecond):
+		}
+	}
+}
 
 // todo 1.follower routine 2.send new entry every hb
 func (rf *Raft) serverRoutines() {
 	for {
 		select {
 		case <-rf.TransferLeaderInfoChan: //server becomes leader begin to do leader routines
-			for rf.state == LEADER && rf.killed() == false { //if not be killed and still leader then
-				//todo sends hb
-				select {
-				case <-rf.NewEntryInfoChan:
-					rf.mu.RLock()
-					if rf.state != LEADER { //double check
-						rf.mu.RUnlock()
-						break
-					}
-					DPrintf("%v %v:SENDS NEW ENTRY TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
-					rf.sendHeartBeatToPeersWithoutLock()
-					rf.mu.RUnlock()
-
-				case <-time.After(time.Duration(HEARTBEAT) * time.Millisecond):
-					rf.mu.RLock()
-					if rf.state != LEADER { //double check
-						rf.mu.RUnlock()
-						break
-					}
-					rf.sendHeartBeatToPeersWithoutLock()
-					rf.mu.RUnlock()
-				}
-			}
-			//case <-rf.TransferFollowerInfoChan: //server becomes Follower begin to do Follower routines
+			go rf.heartBeatService()
+			go rf.newEntryEventHandler()
 		}
 	}
 }
@@ -412,27 +418,26 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	//as large as the candidate’s current term, then the candidate
 	//recognizes the leader as legitimate and returns to follower
 	//state.
-	if args.Entries == nil { //a heartbeat signal
-		DPrintf("%v %v:RECEIVE A HB FROM term:%v,curTerm:%v", rf.state, rf.me, args.Term, rf.currentTerm)
-
-		if args.Term < rf.currentTerm { //hb from an old leader
-			reply.Term = rf.currentTerm
-			reply.Success = false
-			return
-		} else if args.Term >= rf.currentTerm {
-			// there is a new leader
-			rf.mu.Lock()
-			//todo check up-to-date
-			rf.transferToFollower(args.Term)
-			reply.Term = rf.currentTerm
-			reply.Success = true
-			rf.mu.Unlock()
-			return
-		}
-
-	} else {
-
+	reply.Term = rf.currentTerm
+	reply.Success = false
+	if args.Term < rf.currentTerm { //hb from an old leader
+		return
+	} else if args.Term >= rf.currentTerm {
+		// there is a new leader or just reset ticker
+		rf.mu.Lock()
+		//todo check up-to-date
+		rf.transferToFollower(args.Term)
+		rf.mu.Unlock()
 	}
+
+	if args.Entries == nil { //a heartbeat signal
+		rf.mu.RLock()
+		defer rf.mu.RUnlock()
+		reply.Term = rf.currentTerm
+		return
+	}
+	//handle entries
+	return
 }
 
 // return true indicates function is over
