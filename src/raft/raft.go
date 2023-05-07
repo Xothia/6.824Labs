@@ -83,7 +83,8 @@ type Raft struct {
 	TransferLeaderInfoChan   chan bool
 	TransferFollowerInfoChan chan bool
 	AppendEntriesReplyChan   chan *AppendEntriesReply
-	NewEntryInfoChan         chan int //new entry index
+	NewEntryInfoChan         chan int  //new entry index
+	NewCommitInfoChan        chan bool //new Commit
 	//State:
 	state string
 	//Persistent state on all servers:
@@ -313,6 +314,11 @@ func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
 }
+func (rf *Raft) sendHeartBeatToPeersWithoutLock() {
+	DPrintf("%v %v:SENDS HB TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
+	args := rf.makeVoidAppendEntriesArgForLeaderWithoutLock()
+	rf.sendAppendEntriesToPeersWithoutLock(args, rf.AppendEntriesReplyChan)
+}
 
 // todo 1.follower routine 2.send new entry every hb
 func (rf *Raft) serverRoutines() {
@@ -321,27 +327,28 @@ func (rf *Raft) serverRoutines() {
 		case <-rf.TransferLeaderInfoChan: //server becomes leader begin to do leader routines
 			for rf.state == LEADER && rf.killed() == false { //if not be killed and still leader then
 				//todo sends hb
-				//select {
-				//case <-time.After(time.Duration(HEARTBEAT) * time.Millisecond):
-				//
-				//}
-				//
-				rf.mu.RLock()
-				if rf.state != LEADER { //double check
-					break
+				select {
+				case <-rf.NewEntryInfoChan:
+					rf.mu.RLock()
+					if rf.state != LEADER { //double check
+						rf.mu.RUnlock()
+						break
+					}
+					DPrintf("%v %v:SENDS NEW ENTRY TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
+					rf.sendHeartBeatToPeersWithoutLock()
+					rf.mu.RUnlock()
+
+				case <-time.After(time.Duration(HEARTBEAT) * time.Millisecond):
+					rf.mu.RLock()
+					if rf.state != LEADER { //double check
+						rf.mu.RUnlock()
+						break
+					}
+					rf.sendHeartBeatToPeersWithoutLock()
+					rf.mu.RUnlock()
 				}
-				//for <-rf.NewEntryInfoChan {
-				//}
-				DPrintf("%v %v:SENDS HB TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
-				args := rf.makeVoidAppendEntriesArgForLeaderWithoutLock()
-				//lastIndex, _ := rf.getLastLogWithoutLock()
-				//args.Entries = rf.log
-				rf.mu.RUnlock()
-				rf.sendAppendEntriesToPeersWithoutLock(args, rf.AppendEntriesReplyChan)
-				time.Sleep(time.Duration(HEARTBEAT) * time.Millisecond)
 			}
 			//case <-rf.TransferFollowerInfoChan: //server becomes Follower begin to do Follower routines
-
 		}
 	}
 }
@@ -377,7 +384,6 @@ func (rf *Raft) ticker() {
 	DPrintf(strconv.Itoa(rf.me) + ":TICKER STARTED")
 	terminateVoteHandlingChan := make(chan bool, 0)
 	aVoteHandlingIsProcessing := false
-	//flagLock := sync.Mutex{}
 	for rf.killed() == false {
 		// Your code here (2A)
 		select {
@@ -452,18 +458,18 @@ func (rf *Raft) electionTimeoutEventHandler(terminateSignal <-chan bool) bool {
 }
 func (rf *Raft) transferToLeader() {
 	//todo no-op append entry
-
 	rf.mu.Lock()
 	rf.state = LEADER
 	rf.votedFor = -1 //reset votedFor
 	rf.reInitAfterElection()
+	rf.sendHeartBeatToPeersWithoutLock()
 	rf.TransferLeaderInfoChan <- true //start leader routine
+	//rf.do-no-op
 	rf.mu.Unlock()
 	DPrintf("%v %v:TRANSFER TO LEADER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 }
 
 func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVoteReply) {
-	//TODO HANDLE REQUEST VOTE
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//default false
@@ -477,9 +483,7 @@ func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVot
 	if rf.currentTerm < args.Term { //discover a bigger term num
 		rf.transferToFollower(args.Term)
 	}
-
 	votedFor := rf.votedFor
-	// todo have to check id up-to-date
 	if !(votedFor == -1 || votedFor == args.CandidateId) { //do not satisfy requirement
 		//otherwise: voted for other candidate already
 		return
@@ -583,7 +587,7 @@ func (rf *Raft) sendAppendEntriesToPeersWithoutLock(args *AppendEntriesArgs, rep
 		if id != rf.me { //except me
 			go func(peerId int) {
 				reply := AppendEntriesReply{}
-				ok := rf.sendAppendEntries(peerId, args, &reply)
+				ok := rf.sendAppendEntries(peerId, args, &reply) //maybe reply after a long time
 				if ok {
 					replyChan <- &reply
 				} else {
@@ -598,12 +602,9 @@ func (rf *Raft) sendRequestVoteToPeersWithoutLock() chan *RequestVoteReply {
 	replyChan := make(chan *RequestVoteReply, rf.majorityNum)
 	requestVoteArgs := rf.makeRequestVoteArgForCandidateWithoutLock()
 	for id := range rf.peers {
-		//DPrintf("id:%v!!!!!!!!!!!!!!!!", id)
-
 		if id != rf.me { //except me
 			go func(peerId int) {
 				var finalReply *RequestVoteReply = nil
-
 				reply := RequestVoteReply{}
 				//before := time.Now()
 				DPrintf("%v %v:RequestVote RPC TO peer:%v peers:%v", rf.state, rf.me, peerId, len(rf.peers))
@@ -613,7 +614,6 @@ func (rf *Raft) sendRequestVoteToPeersWithoutLock() chan *RequestVoteReply {
 					ok := rf.sendRequestVote(peerId, requestVoteArgs, &reply)
 					res <- ok
 				}(ok)
-				//ok := rf.sendRequestVote(peerId, requestVoteArgs, &reply)
 				select {
 				case res := <-ok:
 					if !res {
@@ -624,13 +624,34 @@ func (rf *Raft) sendRequestVoteToPeersWithoutLock() chan *RequestVoteReply {
 					//case <-time.After(RPC_TIMEOUT * time.Millisecond): //rpc timeout limit
 					//	DPrintf("%v %v:RequestVote RPC TO peer:%v TIMEOUT with time:%v", rf.state, rf.me, peerId, time.Now().Sub(before).Milliseconds())
 				}
-
 				replyChan <- finalReply
 			}(id)
 		}
 	}
 	return replyChan
 }
+func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increment lastApplied, applylog[lastApplied] to state machine (§5.3)
+	DPrintf("%v %v:APPLY COMMITTED ROUTINE", rf.state, rf.me)
+	for rf.killed() == false {
+		select {
+		case <-rf.NewCommitInfoChan:
+			if rf.killed() {
+				return
+			}
+			for rf.commitIndex > rf.lastApplied {
+				rf.lastApplied++
+				entry := rf.log[rf.lastApplied]
+				msg := ApplyMsg{
+					CommandValid: true,
+					Command:      entry.Command,
+					CommandIndex: rf.lastApplied,
+				}
+				rf.applyCh <- msg
+			}
+		}
+	}
+}
+
 func (rf *Raft) makeRequestVoteArgForCandidateWithoutLock() *RequestVoteArgs {
 	index, lastLog := rf.getLastLogWithoutLock()
 	args := &RequestVoteArgs{
@@ -701,6 +722,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.TransferFollowerInfoChan = make(chan bool, 1)
 	rf.AppendEntriesReplyChan = make(chan *AppendEntriesReply, rf.majorityNum)
 	rf.NewEntryInfoChan = make(chan int, 16)
+	rf.NewCommitInfoChan = make(chan bool, 1)
 	//State:
 	rf.state = FOLLOWER
 	//Persistent state on all servers:
@@ -729,7 +751,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 	go rf.serverRoutines()
 	go rf.appendEntriesReplyHandler(rf.AppendEntriesReplyChan)
-	//go rf.basicRoutine()
+	go rf.applyCommittedRoutine()
 	return rf
 }
 func (rf *Raft) reInitAfterElection() {
