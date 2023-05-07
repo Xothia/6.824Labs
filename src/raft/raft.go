@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	//	"bytes"
 	"math/rand"
 	"strconv"
@@ -63,7 +64,6 @@ const (
 	HEARTBEAT         = 103
 	ELEC_TOUT_LOBOUND = HEARTBEAT * 2
 	ELEC_TOUT_UPBOUND = ELEC_TOUT_LOBOUND * 1.5
-	RPC_TIMEOUT       = 150
 )
 
 // Raft A Go object implementing a single Raft peer.
@@ -78,10 +78,12 @@ type Raft struct {
 	//timer
 	electionTimeoutTicker *time.Ticker
 	//channels
-	ElectionTimeoutEventChan  <-chan time.Time
-	TransferLeaderInfoChan    chan bool
-	TransferCandidateInfoChan chan bool
-	AppendEntriesReplyChan    chan *AppendEntriesReply
+	applyCh                  chan<- ApplyMsg
+	ElectionTimeoutEventChan <-chan time.Time
+	TransferLeaderInfoChan   chan bool
+	TransferFollowerInfoChan chan bool
+	AppendEntriesReplyChan   chan *AppendEntriesReply
+	NewEntryInfoChan         chan int //new entry index
 	//State:
 	state string
 	//Persistent state on all servers:
@@ -161,9 +163,12 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
-	Entries  []Entry //empty for heartbeat
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []Entry //empty for heartbeat
+	LeaderCommit int
 }
 
 func (rf *Raft) makeHeartbeatArg() *AppendEntriesArgs {
@@ -191,10 +196,7 @@ type AppendEntriesReply struct {
 // heartbeat detect
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.appendEntriesEventHandler(args, reply)
-	//if rf.state==CANDIDATE{
-	//
-	//}
-	//AppendEntries tells leader still alive then reset the electionTimeoutTicker
+
 }
 
 // RequestVoteArgs
@@ -260,22 +262,35 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election. even if the Raft instance has been killed,
+// agreement and return immediately.
+// there is no guarantee that this command will ever be committed to the Raft log,
+// since the leader may fail or lose an election.
+// even if the Raft instance has been killed,
 // this function should return gracefully.
 //
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
+// the first return value is the index that the command will appear at if it's ever committed.
+// the second return value is the current term.
+// the third return value is true if this server believes it is the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	index := -1
-	term := -1
-	isLeader := true
-	isLeader = rf.isLeader()
+	term := rf.currentTerm
+	isLeader := rf.isLeader()
 	// Your code here (2B).
-
+	if !isLeader {
+		return index, term, isLeader
+	}
+	//is Leader
+	index = rf.appendLogWithoutLock(Entry{
+		Term:    rf.currentTerm,
+		Command: command,
+	})
+	//info ae here comes a new log
+	rf.NewEntryInfoChan <- index
+	// todo update nextIndex[]
+	DPrintf("%v %v:Start() is called,command:%v", rf.state, rf.me, command)
+	rf.printLogs()
 	return index, term, isLeader
 }
 
@@ -298,23 +313,35 @@ func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
 }
-func (rf *Raft) leaderRoutines() {
+
+// todo 1.follower routine 2.send new entry every hb
+func (rf *Raft) serverRoutines() {
 	for {
 		select {
 		case <-rf.TransferLeaderInfoChan: //server becomes leader begin to do leader routines
 			for rf.state == LEADER && rf.killed() == false { //if not be killed and still leader then
 				//todo sends hb
+				//select {
+				//case <-time.After(time.Duration(HEARTBEAT) * time.Millisecond):
+				//
+				//}
+				//
 				rf.mu.RLock()
 				if rf.state != LEADER { //double check
 					break
 				}
+				//for <-rf.NewEntryInfoChan {
+				//}
 				DPrintf("%v %v:SENDS HB TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 				args := rf.makeVoidAppendEntriesArgForLeaderWithoutLock()
+				//lastIndex, _ := rf.getLastLogWithoutLock()
 				//args.Entries = rf.log
 				rf.mu.RUnlock()
 				rf.sendAppendEntriesToPeersWithoutLock(args, rf.AppendEntriesReplyChan)
 				time.Sleep(time.Duration(HEARTBEAT) * time.Millisecond)
 			}
+			//case <-rf.TransferFollowerInfoChan: //server becomes Follower begin to do Follower routines
+
 		}
 	}
 }
@@ -428,7 +455,8 @@ func (rf *Raft) transferToLeader() {
 
 	rf.mu.Lock()
 	rf.state = LEADER
-	rf.votedFor = -1                  //reset votedFor
+	rf.votedFor = -1 //reset votedFor
+	rf.reInitAfterElection()
 	rf.TransferLeaderInfoChan <- true //start leader routine
 	rf.mu.Unlock()
 	DPrintf("%v %v:TRANSFER TO LEADER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
@@ -438,11 +466,12 @@ func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVot
 	//TODO HANDLE REQUEST VOTE
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	//default false
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+	reply.PeerId = rf.me
 
-	if rf.currentTerm > args.Term {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-		reply.PeerId = rf.me
+	if rf.currentTerm > args.Term { //failed to vote
 		return
 	}
 	if rf.currentTerm < args.Term { //discover a bigger term num
@@ -450,17 +479,23 @@ func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVot
 	}
 
 	votedFor := rf.votedFor
-	//todo have to check id up-to-date
-	if votedFor == -1 || votedFor == args.CandidateId {
-		// never voted then vote
-		rf.votedFor = args.CandidateId
-		reply.VoteGranted = true
-		reply.PeerId = rf.me
+	// todo have to check id up-to-date
+	if !(votedFor == -1 || votedFor == args.CandidateId) { //do not satisfy requirement
+		//otherwise: voted for other candidate already
 		return
 	}
-	//otherwise: voted for other candidate
-	reply.Term = rf.currentTerm
-	reply.VoteGranted = false
+	// never voted or voted for this candidate then check up-to-date and vote
+	meLastLogIndex, entry := rf.getLastLogWithoutLock()
+	melastLogTerm := entry.Term
+	if melastLogTerm > args.LastLogTerm { // candidate not up-to-date
+		return
+	}
+	if melastLogTerm == args.LastLogTerm && meLastLogIndex > args.LastLogIndex { // candidate not up-to-date
+		return
+	}
+	//candidate up-to-date granted vote
+	rf.votedFor = args.CandidateId
+	reply.VoteGranted = true
 	reply.PeerId = rf.me
 	return
 }
@@ -526,36 +561,6 @@ func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply, terminateSignal <-
 	}
 	//close(replyChan)
 	return voteRes
-	/////
-
-	//for reply := range replyChan { //count the votes
-	//	totalNum++
-	//	DPrintf("%v %v:GET 1 VOTE REPLY,totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
-	//	if reply == nil {
-	//		DPrintf("%v %v:NIL VOTE(request vote failed),totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
-	//	} else if reply.VoteGranted { //get vote
-	//		voteNum++
-	//		DPrintf("%v %v:GRANTED VOTE,totalNum:%v,voteNum:%v,majority:%v", rf.state, rf.me, totalNum, voteNum, rf.majorityNum)
-	//	} else if reply.Term > tempTerm { //left behind then transfer to follower
-	//		rf.mu.Lock()
-	//		if rf.isCandidate() && (reply.Term > rf.currentTerm) { // candidate transfer to follower
-	//			rf.transferToFollower(reply.Term)
-	//			tempTerm = reply.Term
-	//		}
-	//		rf.mu.Unlock()
-	//	}
-	//
-	//	if totalNum >= len(rf.peers) || voteNum >= rf.majorityNum { //all calls return or get major vote
-	//		break
-	//	}
-	//}
-	//
-	//DPrintf("%v %v:COUNT VOTE OVER,totalNum:%v,voteNum:%v,len(rf.peers):%v", rf.state, rf.me, totalNum, voteNum, len(rf.peers))
-	//if rf.isCandidate() && rf.currentTerm == oldTerm && voteNum >= rf.majorityNum { //become leader
-	//	voteRes = true
-	//}
-	////close(replyChan)
-	//return voteRes
 }
 
 func (rf *Raft) transferToFollower(curTerm int) {
@@ -567,9 +572,10 @@ func (rf *Raft) transferToFollower(curTerm int) {
 }
 func (rf *Raft) makeVoidAppendEntriesArgForLeaderWithoutLock() *AppendEntriesArgs {
 	return &AppendEntriesArgs{
-		Term:     rf.currentTerm,
-		LeaderId: rf.me,
-		Entries:  nil,
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		Entries:      nil,
+		LeaderCommit: rf.commitIndex,
 	}
 }
 func (rf *Raft) sendAppendEntriesToPeersWithoutLock(args *AppendEntriesArgs, replyChan chan *AppendEntriesReply) {
@@ -651,8 +657,9 @@ func (rf *Raft) resetTickerWithLock(lowerBound int64, upperBound int64) {
 	rf.resetTicker(lowerBound, upperBound)
 	rf.mu.RUnlock()
 }
-func (rf *Raft) appendLogWithoutLock(e Entry) {
+func (rf *Raft) appendLogWithoutLock(e Entry) int {
 	rf.log = append(rf.log, e)
+	return len(rf.log) - 1
 }
 func (rf *Raft) getLastLogWithoutLock() (int, Entry) {
 	return len(rf.log), rf.log[len(rf.log)-1] //return index and lastLog
@@ -688,10 +695,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	ms := ELEC_TOUT_LOBOUND + (rand.Int63() % (ELEC_TOUT_UPBOUND - ELEC_TOUT_LOBOUND))
 	rf.electionTimeoutTicker = time.NewTicker(time.Duration(ms) * time.Millisecond)
 	//channels
+	rf.applyCh = applyCh
 	rf.ElectionTimeoutEventChan = rf.electionTimeoutTicker.C
 	rf.TransferLeaderInfoChan = make(chan bool, 1)
-	rf.TransferCandidateInfoChan = make(chan bool, 1)
+	rf.TransferFollowerInfoChan = make(chan bool, 1)
 	rf.AppendEntriesReplyChan = make(chan *AppendEntriesReply, rf.majorityNum)
+	rf.NewEntryInfoChan = make(chan int, 16)
 	//State:
 	rf.state = FOLLOWER
 	//Persistent state on all servers:
@@ -718,7 +727,23 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	go rf.leaderRoutines()
+	go rf.serverRoutines()
 	go rf.appendEntriesReplyHandler(rf.AppendEntriesReplyChan)
+	//go rf.basicRoutine()
 	return rf
+}
+func (rf *Raft) reInitAfterElection() {
+	for i := range rf.nextIndex {
+		//initialized to leader last log index + 1
+		rf.nextIndex[i] = len(rf.log)
+	}
+	rf.matchIndex = make([]int, len(rf.peers)) //initialized to 0
+}
+func (rf *Raft) printLogs() {
+	res := ""
+	for _, e := range rf.log {
+		//initialized to leader last log index + 1
+		res += fmt.Sprintf("|T:%v C:%v|", e.Term, e.Command)
+	}
+	DPrintf(res)
 }
