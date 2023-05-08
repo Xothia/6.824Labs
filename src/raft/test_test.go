@@ -370,18 +370,23 @@ func TestConcurrentStarts2B(t *testing.T) {
 	var success bool
 loop:
 	for try := 0; try < 5; try++ {
+
 		if try > 0 {
 			// give solution some time to settle
 			time.Sleep(3 * time.Second)
 		}
 
 		leader := cfg.checkOneLeader()
+		fmt.Printf("aaaaaaaaaaaaaaaaaaaaaaaa\n")
+		fmt.Printf("START BEGIN\n")
 		_, term, ok := cfg.rafts[leader].Start(1)
+		fmt.Printf("START END\n")
+
 		if !ok {
 			// leader moved on really quickly
 			continue
 		}
-
+		fmt.Printf("bbbbbbbbbbbbbbbbbbbbbbbbbb\n")
 		iters := 5
 		var wg sync.WaitGroup
 		is := make(chan int, iters)
@@ -389,7 +394,11 @@ loop:
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
+				fmt.Printf("START BEGIN\n")
+
 				i, term1, ok := cfg.rafts[leader].Start(100 + i)
+				fmt.Printf("START END\n")
+
 				if term1 != term {
 					return
 				}
@@ -402,6 +411,7 @@ loop:
 
 		wg.Wait()
 		close(is)
+		fmt.Printf("ccccccccccccccccccccccc\n")
 
 		for j := 0; j < servers; j++ {
 			if t, _ := cfg.rafts[j].GetState(); t != term {
@@ -409,6 +419,7 @@ loop:
 				continue loop
 			}
 		}
+		fmt.Printf("ddddddddddddddddddddddddd\n")
 
 		failed := false
 		cmds := []int{}
@@ -427,6 +438,7 @@ loop:
 				t.Fatalf("value %v is not an int", cmd)
 			}
 		}
+		fmt.Printf("eeeeeeeeeeeeeeeeeeeeeeee\n")
 
 		if failed {
 			// avoid leaking goroutines
@@ -436,6 +448,7 @@ loop:
 			}()
 			continue
 		}
+		fmt.Printf("ffffffffffffffffffffffffffffffffff\n")
 
 		for ii := 0; ii < iters; ii++ {
 			x := 100 + ii

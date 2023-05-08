@@ -273,24 +273,27 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the third return value is true if this server believes it is the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	FPrintf("%v %v:Start() is invoked,command:%v", rf.state, rf.me, command)
 	index := -1
 	term := rf.currentTerm
 	isLeader := rf.isLeader()
 	// Your code here (2B).
 	if !isLeader {
+		rf.mu.Unlock()
 		return index, term, isLeader
 	}
 	//is Leader
-	index = rf.appendLogWithoutLock(Entry{
+	newEntry := Entry{
 		Term:    rf.currentTerm,
 		Command: command,
-	})
+	}
+	index = rf.appendLogWithoutLock(newEntry)
 	//info ae here comes a new log
 	rf.NewEntryInfoChan <- index
 	// todo update nextIndex[]
-	DPrintf("%v %v:Start() is called,command:%v", rf.state, rf.me, command)
+	FPrintf("%v %v:Start() is end, NewEntryInfoChan <- index, index:%v ,command:%v", rf.state, rf.me, index, command)
 	rf.printLogs()
+	rf.mu.Unlock()
 	return index, term, isLeader
 }
 
@@ -308,44 +311,162 @@ func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 }
-
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
 }
 func (rf *Raft) sendHeartBeatToPeersWithoutLock() {
-	DPrintf("%v %v:SENDS HB TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 	args := rf.makeVoidAppendEntriesArgForLeaderWithoutLock()
 	rf.sendAppendEntriesToPeersWithoutLock(args, rf.AppendEntriesReplyChan)
 }
+
 func (rf *Raft) heartBeatService() {
 	for {
 		time.Sleep(time.Duration(HEARTBEAT) * time.Millisecond)
+		DPrintf("%v %v:BEGIN SENDS HB TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 		rf.mu.RLock()
 		if rf.state != LEADER || rf.killed() { //double check
 			rf.mu.RUnlock()
 			break
 		}
 		rf.sendHeartBeatToPeersWithoutLock()
+		DPrintf("%v %v:END SENDS HB TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 		rf.mu.RUnlock()
 	}
+}
+
+func (rf *Raft) appendNewEntry(peer int, index int, newEntryIndex int, successInfoChan chan<- bool) {
+	FPrintf("%v %v:appendNewEntry has been called, term:%v, peer:%v, index:%v, newEntryIndex:%v",
+		rf.state, rf.me, rf.currentTerm, peer, index, newEntryIndex)
+	reply := AppendEntriesReply{
+		Term:    0,
+		Success: false,
+	}
+	retryTimes := 0
+	MaxRetryTimes := 6
+	oldTerm := rf.currentTerm
+	for !reply.Success && rf.state == LEADER && !rf.killed() { //until success or terminated
+		rf.mu.RLock()
+		arg := rf.makeAEArgsByIndex(index, newEntryIndex+1)
+		rf.mu.RUnlock()
+
+		ok := rf.sendAppendEntries(peer, &arg, &reply) //may return slowly
+		if !ok && retryTimes < MaxRetryTimes {
+			retryTimes++
+			FPrintf("%v %v:appendNewEntry failed due to network, retrying..., retrytime:%v, term:%v, peer:%v, index:%v, newEntryIndex:%v",
+				rf.state, rf.me, retryTimes, rf.currentTerm, peer, index, newEntryIndex)
+			continue //network fail retry at most MaxRetryTimes times
+		} else if retryTimes >= MaxRetryTimes {
+			DPrintf("%v %v:appendNewEntry FINAL failed STOP RETRY , index:%v", rf.state, rf.me, index)
+			break
+		}
+		if !reply.Success {
+			if index == 1 { // todo something went wrong
+				DPrintf("%v %v:appendNewEntry FINAL failed due to ???, index:%v", rf.state, rf.me, index)
+				break
+			}
+			index--
+			rf.mu.Lock()
+			rf.nextIndex[peer] = index
+			rf.mu.Unlock()
+			DPrintf("%v %v:appendNewEntry FAILED, retry with index DECREMENT:%v", rf.state, rf.me, index)
+		}
+	}
+
+	if reply.Success && rf.state == LEADER && rf.currentTerm == oldTerm && !rf.killed() { // update nextIndex[] matchIndex
+		rf.mu.Lock()
+		rf.nextIndex[peer] = newEntryIndex + 1
+		rf.matchIndex[peer] = newEntryIndex
+		rf.mu.Unlock()
+		successInfoChan <- true
+		DPrintf("%v %v:appendNewEntry FINAL SUCCESS, index:%v", rf.state, rf.me, index)
+		return
+	}
+	DPrintf("%v %v:appendNewEntry TO %v FINAL failed, index:%v", rf.state, rf.me, peer, index)
+	successInfoChan <- false
 }
 
 func (rf *Raft) newEntryEventHandler() {
 	for rf.state == LEADER && !rf.killed() {
 		select {
-		case <-rf.NewEntryInfoChan: //AEArgsChan
-			rf.mu.RLock()
+		case newEntryIndex := <-rf.NewEntryInfoChan: //AEArgsChan
+			rf.mu.Lock()
 			if rf.state != LEADER || rf.killed() { //double check
-				rf.mu.RUnlock()
+				rf.mu.Unlock()
 				break
 			}
-			DPrintf("%v %v:SENDS NEW ENTRY TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
-			rf.sendHeartBeatToPeersWithoutLock()
-			rf.mu.RUnlock()
+			DPrintf("%v %v:SENDS NEW ENTRY TO PEERS, index:%v, curTerm:%v, PEERS NUM:%v", rf.state, rf.me, newEntryIndex, rf.currentTerm, len(rf.nextIndex))
+			//processing
+			successInfoChan := make(chan bool, 1)
+			for peer, index := range rf.nextIndex {
+				if peer == rf.me {
+					rf.nextIndex[peer] = newEntryIndex + 1
+					rf.matchIndex[peer] = newEntryIndex
+					continue
+				}
+				DPrintf("%v %v:INVOKE rf.appendNewEntry, curTerm:%v", rf.state, rf.me, rf.currentTerm)
+
+				go rf.appendNewEntry(peer, index, newEntryIndex, successInfoChan)
+
+			}
+			rf.mu.Unlock()
+			DPrintf("%v %v:WAITING FOR SUCCESS COUNTING..., index:%v, curTerm:%v", rf.state, rf.me, newEntryIndex, rf.currentTerm)
+
+			successNum := 1
+			replyNum := 1
+			committed := false
+			for success := range successInfoChan { //what if never success?
+				replyNum++
+				if success {
+					successNum++
+				}
+				if successNum >= rf.majorityNum { // committed
+					committed = true
+					break
+				}
+				if replyNum >= len(rf.peers) {
+					break
+				}
+			}
+			if !committed {
+				DPrintf("%v %v:SUCCESS COUNTING END:FAILED, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
+				continue
+			}
+			rf.mu.Lock()
+			for rf.updateCommitIndex() {
+			}
+			rf.NewCommitInfoChan <- true
+			rf.mu.Unlock()
+			DPrintf("%v %v:SUCCESS COUNTING END:SUCCESS, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
+
 		case <-time.After(time.Duration(HEARTBEAT) * time.Millisecond):
 		}
 	}
+}
+func (rf *Raft) updateCommitIndex() bool {
+	N := rf.commitIndex + 1
+	sum := 0
+	for _, lastLogIndex := range rf.matchIndex {
+		if lastLogIndex >= N {
+			sum++
+		}
+	}
+	if sum >= rf.majorityNum && rf.log[N].Term == rf.currentTerm {
+		rf.commitIndex = N
+		return true
+	}
+	return false
+}
+func (rf *Raft) makeAEArgsByIndex(beginIndex int, endIndex int) AppendEntriesArgs {
+	arg := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: beginIndex - 1,
+		PrevLogTerm:  rf.log[beginIndex-1].Term,
+		Entries:      rf.log[beginIndex:endIndex],
+		LeaderCommit: rf.commitIndex,
+	}
+	return arg
 }
 
 // todo 1.follower routine 2.send new entry every hb
@@ -358,6 +479,7 @@ func (rf *Raft) serverRoutines() {
 		}
 	}
 }
+
 func (rf *Raft) appendEntriesReplyHandler(replyChan chan *AppendEntriesReply) {
 	DPrintf(strconv.Itoa(rf.me) + ":AE REPLY HANDLER STARTED")
 	for reply := range replyChan {
@@ -418,25 +540,70 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	//as large as the candidate’s current term, then the candidate
 	//recognizes the leader as legitimate and returns to follower
 	//state.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	if args.Term < rf.currentTerm { //hb from an old leader
 		return
-	} else if args.Term >= rf.currentTerm {
-		// there is a new leader or just reset ticker
-		rf.mu.Lock()
-		//todo check up-to-date
+	} else if args.Term >= rf.currentTerm { // there is a new leader or just reset ticker
 		rf.transferToFollower(args.Term)
-		rf.mu.Unlock()
 	}
-
 	if args.Entries == nil { //a heartbeat signal
-		rf.mu.RLock()
-		defer rf.mu.RUnlock()
-		reply.Term = rf.currentTerm
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = Min(args.LeaderCommit, len(rf.log)-1)
+			DPrintf("%v %v:UPDATE COMMIT INDEX DRIVE BY HB, args.LeaderCommit:%v, len(rf.log)-1:%v,curTerm:%v, commitIndex:%v",
+				rf.state, rf.me, args.LeaderCommit, len(rf.log)-1, rf.currentTerm, rf.commitIndex)
+			rf.NewCommitInfoChan <- true
+		}
 		return
 	}
 	//handle entries
+	lastLogIndex, _ := rf.getLastLogWithoutLock()
+	if lastLogIndex < args.PrevLogIndex {
+		return
+	}
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // todo panic: runtime error: index out of range [2] with length 2
+		return
+	}
+	//appendEntries will success
+	reply.Success = true
+	//If an existing entry conflicts with a new one (same index
+	//but different terms), delete the existing entry and all that
+	//follow it (§5.3)
+	//check consistency from PrevLogIndex to PrevLogIndex+entries delete inconsistent logs
+	appendFlag := false
+	for index, entry := range args.Entries {
+		if args.PrevLogIndex+index+1 >= len(rf.log) { //illegal index
+			appendFlag = true
+			break
+		}
+		if rf.log[args.PrevLogIndex+index+1].Term != entry.Term {
+			rf.log = rf.log[:args.PrevLogIndex+1] //delete logs after args.PrevLogIndex
+			appendFlag = true
+			break
+		}
+	}
+	//if lastLogIndex != args.PrevLogIndex {
+	//	rf.log = rf.log[:args.PrevLogIndex+1]  //delete logs after args.PrevLogIndex
+	//}
+	if appendFlag {
+		//append new entries
+		newEntryLen := len(args.Entries)
+		for i := 0; i < newEntryLen; i++ {
+			rf.appendLogWithoutLock(args.Entries[i])
+		}
+	}
+	//update commitIndex
+	//newLastIndex := args.PrevLogIndex + newEntryLen // todo
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = Min(args.LeaderCommit, len(rf.log)-1)
+		DPrintf("%v %v:UPDATE COMMIT INDEX, args.LeaderCommit:%v, newLastIndex:%v, curTerm:%v, commitIndex:%v",
+			rf.state, rf.me, args.LeaderCommit, len(rf.log)-1, rf.currentTerm, rf.commitIndex)
+		rf.NewCommitInfoChan <- true //may deadlock due to Chan is full and blocked and lock is un-release
+	}
+	DPrintf("%v %v:SUCCESS UPDATE LOGS, curTerm:%v, commitIndex:%v", rf.state, rf.me, rf.currentTerm, rf.commitIndex)
+	rf.printLogs()
 	return
 }
 
@@ -469,9 +636,17 @@ func (rf *Raft) transferToLeader() {
 	rf.reInitAfterElection()
 	rf.sendHeartBeatToPeersWithoutLock()
 	rf.TransferLeaderInfoChan <- true //start leader routine
-	//rf.do-no-op
+	//noopIndex := rf.doNoOp()          // todo !!!!!!!!!!!!
 	rf.mu.Unlock()
+	//DPrintf("%v %v:TRANSFER TO LEADER, noop Index:%v,curTerm:%v", rf.state, rf.me, noopIndex, rf.currentTerm)
 	DPrintf("%v %v:TRANSFER TO LEADER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
+}
+func (rf *Raft) doNoOp() int {
+	noopEntry := rf.makeNoOpEntry()
+	index := rf.appendLogWithoutLock(noopEntry)
+	//info ae here comes a new log
+	rf.NewEntryInfoChan <- index
+	return index
 }
 
 func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -640,19 +815,29 @@ func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increm
 	for rf.killed() == false {
 		select {
 		case <-rf.NewCommitInfoChan:
+			rf.mu.Lock()
 			if rf.killed() {
+				rf.mu.Unlock()
 				return
 			}
+			DPrintf("%v %v:RECEIVE NewCommitInfo", rf.state, rf.me)
 			for rf.commitIndex > rf.lastApplied {
+
+				DPrintf("%v %v:BEGIN TO APPLY", rf.state, rf.me)
+
 				rf.lastApplied++
-				entry := rf.log[rf.lastApplied]
+				entry := rf.log[rf.lastApplied] // todo runtime error: index out of range [2] with length 2
 				msg := ApplyMsg{
 					CommandValid: true,
 					Command:      entry.Command,
 					CommandIndex: rf.lastApplied,
 				}
-				rf.applyCh <- msg
+				if msg.Command != nil { //nil is no-op log
+					rf.applyCh <- msg
+					DPrintf("%v %v:APPLY COMPLETE, command:%v, command index:%v", rf.state, rf.me, msg.Command, msg.CommandIndex)
+				}
 			}
+			rf.mu.Unlock()
 		}
 	}
 }
@@ -678,17 +863,13 @@ func (rf *Raft) resetTicker(lowerBound int64, upperBound int64) {
 	ms := lowerBound + (rand.Int63() % (upperBound - lowerBound))
 	rf.electionTimeoutTicker.Reset(time.Duration(ms) * time.Millisecond)
 }
-func (rf *Raft) resetTickerWithLock(lowerBound int64, upperBound int64) {
-	rf.mu.RLock()
-	rf.resetTicker(lowerBound, upperBound)
-	rf.mu.RUnlock()
-}
+
 func (rf *Raft) appendLogWithoutLock(e Entry) int {
 	rf.log = append(rf.log, e)
 	return len(rf.log) - 1
 }
 func (rf *Raft) getLastLogWithoutLock() (int, Entry) {
-	return len(rf.log), rf.log[len(rf.log)-1] //return index and lastLog
+	return len(rf.log) - 1, rf.log[len(rf.log)-1] //return index and lastLog
 }
 func (rf *Raft) isCandidate() bool {
 	return rf.state == CANDIDATE
@@ -726,8 +907,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.TransferLeaderInfoChan = make(chan bool, 1)
 	rf.TransferFollowerInfoChan = make(chan bool, 1)
 	rf.AppendEntriesReplyChan = make(chan *AppendEntriesReply, rf.majorityNum)
-	rf.NewEntryInfoChan = make(chan int, 16)
-	rf.NewCommitInfoChan = make(chan bool, 1)
+	rf.NewEntryInfoChan = make(chan int, 64)
+	rf.NewCommitInfoChan = make(chan bool, 64)
 	//State:
 	rf.state = FOLLOWER
 	//Persistent state on all servers:
@@ -740,7 +921,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	//Volatile state on leaders:
 	rf.nextIndex = make([]int, len(rf.peers))
-	for i := range rf.nextIndex {
+	for i, _ := range rf.nextIndex {
 		//initialized to leader last log index + 1
 		rf.nextIndex[i] = len(rf.log)
 	}
@@ -760,7 +941,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 func (rf *Raft) reInitAfterElection() {
-	for i := range rf.nextIndex {
+	for i, _ := range rf.nextIndex {
 		//initialized to leader last log index + 1
 		rf.nextIndex[i] = len(rf.log)
 	}
