@@ -172,16 +172,6 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 }
 
-func (rf *Raft) makeHeartbeatArg() *AppendEntriesArgs {
-	//ONLY leader will invoke this method
-	//TODO
-	return &AppendEntriesArgs{
-		Term:     rf.currentTerm,
-		LeaderId: rf.me, //me must be leader
-		Entries:  nil,
-	}
-}
-
 // only leader invoke this method
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
@@ -491,8 +481,9 @@ func (rf *Raft) appendEntriesReplyHandler(replyChan chan *AppendEntriesReply) {
 		}
 		if reply != nil {
 			DPrintf("%v %v:HANDLED A appendEntriesReply,replyTerm:%v, reply:%v", rf.state, rf.me, reply.Term, reply.Success)
+		} else {
+			DPrintf("%v %v:HANDLED A nil appendEntriesReply, curTerm:%v", rf.state, rf.me, rf.currentTerm)
 		}
-		DPrintf("%v %v:HANDLED A nil appendEntriesReply, curTerm:%v", rf.state, rf.me, rf.currentTerm)
 		//todo handle appendEntries reply
 		//reply maybe nil due to network failure
 		if reply != nil && reply.Term > rf.currentTerm {
@@ -528,18 +519,12 @@ func (rf *Raft) ticker() {
 					aVoteHandlingIsProcessing = !rf.electionTimeoutEventHandler(terminateVoteHandlingChan)
 				}()
 			}
-
 		}
-
 	}
 }
 func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	//todo handle hb
 	// IfAppendEntries RPC received from new leader: convert to follower
-	//If the leader’s term (included in its RPC) is at least
-	//as large as the candidate’s current term, then the candidate
-	//recognizes the leader as legitimate and returns to follower
-	//state.
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
@@ -549,15 +534,7 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	} else if args.Term >= rf.currentTerm { // there is a new leader or just reset ticker
 		rf.transferToFollower(args.Term)
 	}
-	if args.Entries == nil { //a heartbeat signal
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = Min(args.LeaderCommit, len(rf.log)-1)
-			DPrintf("%v %v:UPDATE COMMIT INDEX DRIVE BY HB, args.LeaderCommit:%v, len(rf.log)-1:%v,curTerm:%v, commitIndex:%v",
-				rf.state, rf.me, args.LeaderCommit, len(rf.log)-1, rf.currentTerm, rf.commitIndex)
-			rf.NewCommitInfoChan <- true
-		}
-		return
-	}
+
 	//handle entries
 	lastLogIndex, _ := rf.getLastLogWithoutLock()
 	if lastLogIndex < args.PrevLogIndex {
@@ -566,10 +543,20 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // todo panic: runtime error: index out of range [2] with length 2
 		return
 	}
+
+	if args.Entries == nil { //a heartbeat signal BUT THIS PLACE IS WRONG
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = Min(args.LeaderCommit, len(rf.log)-1)
+			DPrintf("%v %v:UPDATE COMMIT INDEX DRIVE BY HB, args.LeaderCommit:%v, len(rf.log)-1:%v,curTerm:%v, commitIndex:%v",
+				rf.state, rf.me, args.LeaderCommit, len(rf.log)-1, rf.currentTerm, rf.commitIndex)
+			rf.NewCommitInfoChan <- true
+		}
+		return
+	}
+
 	//appendEntries will success
 	reply.Success = true
 	//If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
-	//check consistency from PrevLogIndex to PrevLogIndex+entries delete inconsistent logs
 	//if match then do nothing else del and append
 	matchFlag := true
 	for index, entry := range args.Entries {
@@ -580,21 +567,7 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 			break
 		}
 	}
-	//appendFlag := false
-	//for index, entry := range args.Entries {
-	//	if args.PrevLogIndex+index+1 >= len(rf.log) { //illegal index
-	//		appendFlag = true
-	//		break
-	//	}
-	//	if rf.log[args.PrevLogIndex+index+1].Term != entry.Term {
-	//		rf.log = rf.log[:args.PrevLogIndex+1] //delete logs after args.PrevLogIndex
-	//		appendFlag = true
-	//		break
-	//	}
-	//}
-	//if lastLogIndex != args.PrevLogIndex {
-	//	rf.log = rf.log[:args.PrevLogIndex+1]  //delete logs after args.PrevLogIndex
-	//}
+
 	if !matchFlag { //if unmatched then append new/real entries
 		newEntryLen := len(args.Entries)
 		for i := 0; i < newEntryLen; i++ {
@@ -602,7 +575,6 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 		}
 	}
 	//update commitIndex
-	//newLastIndex := args.PrevLogIndex + newEntryLen // todo
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = Min(args.LeaderCommit, len(rf.log)-1)
 		DPrintf("%v %v:UPDATE COMMIT INDEX, args.LeaderCommit:%v, newLastIndex:%v, curTerm:%v, commitIndex:%v",
@@ -641,9 +613,9 @@ func (rf *Raft) transferToLeader() {
 	rf.state = LEADER
 	rf.votedFor = -1 //reset votedFor
 	rf.reInitAfterElection()
+	//rf.doNoOp()
 	rf.sendHeartBeatToPeersWithoutLock()
 	rf.TransferLeaderInfoChan <- true //start leader routine
-	//noopIndex := rf.doNoOp()          // todo !!!!!!!!!!!!
 	rf.mu.Unlock()
 	//DPrintf("%v %v:TRANSFER TO LEADER, noop Index:%v,curTerm:%v", rf.state, rf.me, noopIndex, rf.currentTerm)
 	DPrintf("%v %v:TRANSFER TO LEADER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
@@ -765,6 +737,8 @@ func (rf *Raft) makeVoidAppendEntriesArgForLeaderWithoutLock() *AppendEntriesArg
 	return &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
+		PrevLogIndex: len(rf.log) - 1,
+		PrevLogTerm:  rf.log[len(rf.log)-1].Term,
 		Entries:      nil,
 		LeaderCommit: rf.commitIndex,
 	}
@@ -839,10 +813,9 @@ func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increm
 					Command:      entry.Command,
 					CommandIndex: rf.lastApplied,
 				}
-				if msg.Command != nil { //nil is no-op log
-					rf.applyCh <- msg
-					DPrintf("%v %v:APPLY COMPLETE, command:%v, command index:%v", rf.state, rf.me, msg.Command, msg.CommandIndex)
-				}
+
+				rf.applyCh <- msg
+				DPrintf("%v %v:APPLY COMPLETE, command:%v, command index:%v", rf.state, rf.me, msg.Command, msg.CommandIndex)
 			}
 			rf.mu.Unlock()
 		}
