@@ -568,27 +568,34 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	}
 	//appendEntries will success
 	reply.Success = true
-	//If an existing entry conflicts with a new one (same index
-	//but different terms), delete the existing entry and all that
-	//follow it (§5.3)
+	//If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
 	//check consistency from PrevLogIndex to PrevLogIndex+entries delete inconsistent logs
-	appendFlag := false
+	//if match then do nothing else del and append
+	matchFlag := true
 	for index, entry := range args.Entries {
-		if args.PrevLogIndex+index+1 >= len(rf.log) { //illegal index
-			appendFlag = true
-			break
-		}
-		if rf.log[args.PrevLogIndex+index+1].Term != entry.Term {
+		if args.PrevLogIndex+index+1 >= len(rf.log) || //illegal index
+			rf.log[args.PrevLogIndex+index+1].Term != entry.Term { //term unmatched
 			rf.log = rf.log[:args.PrevLogIndex+1] //delete logs after args.PrevLogIndex
-			appendFlag = true
+			matchFlag = false
 			break
 		}
 	}
+	//appendFlag := false
+	//for index, entry := range args.Entries {
+	//	if args.PrevLogIndex+index+1 >= len(rf.log) { //illegal index
+	//		appendFlag = true
+	//		break
+	//	}
+	//	if rf.log[args.PrevLogIndex+index+1].Term != entry.Term {
+	//		rf.log = rf.log[:args.PrevLogIndex+1] //delete logs after args.PrevLogIndex
+	//		appendFlag = true
+	//		break
+	//	}
+	//}
 	//if lastLogIndex != args.PrevLogIndex {
 	//	rf.log = rf.log[:args.PrevLogIndex+1]  //delete logs after args.PrevLogIndex
 	//}
-	if appendFlag {
-		//append new entries
+	if !matchFlag { //if unmatched then append new/real entries
 		newEntryLen := len(args.Entries)
 		for i := 0; i < newEntryLen; i++ {
 			rf.appendLogWithoutLock(args.Entries[i])
