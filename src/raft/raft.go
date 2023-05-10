@@ -134,6 +134,7 @@ func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry) {
 		someThingChanged = true
 	}
 	if someThingChanged {
+		GPrintf("%v %v:SOME Thing Changed, currentTerm:%v ,votedFor:%v, log:%v", rf.state, rf.me, currentTerm, votedFor, log)
 		rf.persist()
 	}
 }
@@ -158,10 +159,11 @@ func (rf *Raft) persist() {
 	if e.Encode(rf.currentTerm) != nil ||
 		e.Encode(rf.votedFor) != nil ||
 		e.Encode(rf.log) != nil {
-		FPrintf("persist failed.")
+		GPrintf("persist failed.")
 	} else {
 		raftState := w.Bytes()
 		rf.persister.Save(raftState, nil)
+		GPrintf("persist success, raft state:%v", raftState)
 	}
 }
 
@@ -180,11 +182,12 @@ func (rf *Raft) readPersist(data []byte) {
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&log) != nil {
-		FPrintf("readPersist failed.")
+		GPrintf("readPersist failed.")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		GPrintf("readPersist success.currentTerm:%v,votedFor:%v,log:%v", currentTerm, votedFor, log)
 	}
 }
 
@@ -676,7 +679,7 @@ func (rf *Raft) transferToLeader() {
 	//todo no-op append entry
 	rf.mu.Lock()
 	rf.state = LEADER
-	rf.setPersistentState(-1, -1, nil)
+	rf.setPersistentState(-1, -2, nil)
 	//rf.votedFor = -1 //reset votedFor
 	rf.reInitAfterElection()
 	//rf.doNoOp()
@@ -983,8 +986,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	//rf.persist()
 	rf.readPersist(persister.ReadRaftState())
-	//todo bugs may be here (nextIndex/Log)
 
+	//todo bugs may be here (nextIndex/Log)
+	GPrintf("%v %v:COME TO LIFE, currentTerm:%v, votedFor:%v", rf.state, rf.me, rf.currentTerm, rf.votedFor)
+	rf.printLogs()
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.serverRoutines()

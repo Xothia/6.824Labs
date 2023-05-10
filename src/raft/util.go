@@ -5,6 +5,7 @@ import "log"
 // Debugging
 const Debug = true
 const FDebug = true
+const GDebug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -18,6 +19,13 @@ func FPrintf(format string, a ...interface{}) (n int, err error) {
 	}
 	return
 }
+func GPrintf(format string, a ...interface{}) (n int, err error) {
+	if GDebug {
+		log.Printf(format, a...)
+	}
+	return
+}
+
 func Min(a int, b int) int {
 	res := b
 	if a < b {
