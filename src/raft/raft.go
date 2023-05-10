@@ -188,7 +188,7 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-// the service says it has created a snapshot that has
+// Snapshot the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
@@ -394,13 +394,13 @@ func (rf *Raft) appendNewEntry(peer int, index int, newEntryIndex int, successIn
 				break
 			}
 			// todo wait for optimize
-			//if reply.ConflictTerm != -1 {
-			//	index = reply.ConflictTermFirstIndex
-			//	DPrintf("%v %v:appendNewEntry :reply.ConflictTerm:%v, ConflictTermFirstIndex:%v, index:%v", rf.state, rf.me, reply.ConflictTerm, reply.ConflictTermFirstIndex, index)
-			//} else {
-			//	index--
-			//}
-			index--
+			if reply.ConflictTerm != -1 {
+				index = reply.ConflictTermFirstIndex
+				DPrintf("%v %v:appendNewEntry :reply.ConflictTerm:%v, ConflictTermFirstIndex:%v, index:%v", rf.state, rf.me, reply.ConflictTerm, reply.ConflictTermFirstIndex, index)
+			} else {
+				index--
+			}
+			//index--
 			rf.mu.Lock()
 			rf.nextIndex[peer] = index
 			rf.mu.Unlock()
@@ -568,7 +568,7 @@ func (rf *Raft) ticker() {
 	}
 }
 func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	//todo handle hb
+	//todo what if candidate this
 	// IfAppendEntries RPC received from new leader: convert to follower
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -577,6 +577,10 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	if args.Term < rf.currentTerm { //hb from an old leader
+		if rf.state == CANDIDATE { //overhead candidate
+			reply.ConflictTerm = 1
+			reply.ConflictTermFirstIndex = 1
+		}
 		return
 	} else if args.Term >= rf.currentTerm { // there is a new leader or just reset ticker
 		rf.transferToFollower(args.Term)
@@ -677,7 +681,8 @@ func (rf *Raft) transferToLeader() {
 	rf.reInitAfterElection()
 	//rf.doNoOp()
 	rf.sendHeartBeatToPeersWithoutLock()
-	rf.TransferLeaderInfoChan <- true //start leader routine
+	rf.NewEntryInfoChan = make(chan int, 64) //reset NewEntryInfoChan
+	rf.TransferLeaderInfoChan <- true        //start leader routine
 	rf.mu.Unlock()
 	//DPrintf("%v %v:TRANSFER TO LEADER, noop Index:%v,curTerm:%v", rf.state, rf.me, noopIndex, rf.currentTerm)
 	DPrintf("%v %v:TRANSFER TO LEADER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
@@ -967,7 +972,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	//Volatile state on leaders:
 	rf.nextIndex = make([]int, len(rf.peers))
-	for i, _ := range rf.nextIndex {
+	for i := range rf.nextIndex {
 		//initialized to leader last log index + 1
 		rf.nextIndex[i] = len(rf.log)
 	}
@@ -988,7 +993,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 func (rf *Raft) reInitAfterElection() {
-	for i, _ := range rf.nextIndex {
+	for i := range rf.nextIndex {
 		//initialized to leader last log index + 1
 		rf.nextIndex[i] = len(rf.log)
 	}
