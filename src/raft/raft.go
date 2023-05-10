@@ -163,7 +163,7 @@ func (rf *Raft) persist() {
 	} else {
 		raftState := w.Bytes()
 		rf.persister.Save(raftState, nil)
-		GPrintf("persist success, raft state:%v", raftState)
+		GPrintf("persist success, raft state:%v", rf.persister.ReadRaftState())
 	}
 }
 
@@ -187,7 +187,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
-		GPrintf("readPersist success.currentTerm:%v,votedFor:%v,log:%v", currentTerm, votedFor, log)
+		GPrintf("readPersist success.currentTerm:%v,votedFor:%v,log:%v,date:%v", currentTerm, votedFor, log, data)
 	}
 }
 
