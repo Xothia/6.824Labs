@@ -455,18 +455,41 @@ func (rf *Raft) newEntryEventHandler() {
 			successNum := 1
 			replyNum := 1
 			committed := false
-			for success := range successInfoChan { //what if never success?
-				replyNum++
-				if success {
-					successNum++
-				}
-				if successNum >= rf.majorityNum { // committed
-					committed = true
+			//for success := range successInfoChan { //what if never success?
+			//	replyNum++
+			//	if success {
+			//		successNum++
+			//	}
+			//	if successNum >= rf.majorityNum { // committed
+			//		committed = true
+			//		break
+			//	}
+			//	if replyNum >= len(rf.peers) {
+			//		break
+			//	}
+			//}
+			run := true
+			for run {
+				select {
+				case success := <-successInfoChan:
+					replyNum++
+					if success {
+						successNum++
+					}
+					if successNum >= rf.majorityNum { // committed
+						committed = true
+						run = false
+						break
+					}
+					if replyNum >= len(rf.peers) {
+						run = false
+						break
+					}
+				case <-time.After(1000 * time.Millisecond):
+					run = false
 					break
 				}
-				if replyNum >= len(rf.peers) {
-					break
-				}
+
 			}
 			if !committed {
 				HPrintf("%v %v:SUCCESS COUNTING END:FAILED, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
@@ -883,7 +906,7 @@ func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increm
 				return
 			}
 			DPrintf("%v %v:RECEIVE NewCommitInfo", rf.state, rf.me)
-			rf.sendHeartBeatToPeersWithoutLock()
+			//rf.sendHeartBeatToPeersWithoutLock()
 			for rf.commitIndex > rf.lastApplied {
 
 				DPrintf("%v %v:BEGIN TO APPLY", rf.state, rf.me)
