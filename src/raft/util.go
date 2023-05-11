@@ -6,6 +6,14 @@ import "log"
 const Debug = false
 const FDebug = false
 const GDebug = false
+const HDebug = true
+
+func HPrintf(format string, a ...interface{}) (n int, err error) {
+	if HDebug {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {

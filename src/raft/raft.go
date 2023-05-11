@@ -64,7 +64,7 @@ const (
 	FOLLOWER  = "Follower"
 	// HEARTBEAT The tester requires that the leader send heartbeat RPCs no more than ten times per second.
 	HEARTBEAT         = 103
-	ELEC_TOUT_LOBOUND = HEARTBEAT * 2
+	ELEC_TOUT_LOBOUND = HEARTBEAT*2 + 10
 	ELEC_TOUT_UPBOUND = ELEC_TOUT_LOBOUND * 1.5
 )
 
@@ -302,7 +302,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the third return value is true if this server believes it is the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
-	FPrintf("%v %v:Start() is invoked,command:%v", rf.state, rf.me, command)
+	HPrintf("%v %v:Start() is invoked,command:%v", rf.state, rf.me, command)
 	index := -1
 	term := rf.currentTerm
 	isLeader := rf.isLeader()
@@ -318,9 +318,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	index = rf.appendLogWithoutLock(newEntry)
 	//info ae here comes a new log
+	HPrintf("%v %v:Start() is going to write NewEntryInfoChan, index:%v ,command:%v", rf.state, rf.me, index, command)
 	rf.NewEntryInfoChan <- index
 	// todo update nextIndex[]
-	FPrintf("%v %v:Start() is end, NewEntryInfoChan <- index, index:%v ,command:%v", rf.state, rf.me, index, command)
+	HPrintf("%v %v:Start() is end, NewEntryInfoChan <- index, index:%v ,command:%v", rf.state, rf.me, index, command)
 	rf.printLogs()
 	rf.mu.Unlock()
 	return index, term, isLeader
@@ -428,12 +429,13 @@ func (rf *Raft) newEntryEventHandler() {
 	for rf.state == LEADER && !rf.killed() {
 		select {
 		case newEntryIndex := <-rf.NewEntryInfoChan: //AEArgsChan
+			HPrintf("%v %v:!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!:%v", rf.state, rf.me, newEntryIndex)
 			rf.mu.Lock()
 			if rf.state != LEADER || rf.killed() { //double check
 				rf.mu.Unlock()
 				break
 			}
-			DPrintf("%v %v:SENDS NEW ENTRY TO PEERS, index:%v, curTerm:%v, PEERS NUM:%v", rf.state, rf.me, newEntryIndex, rf.currentTerm, len(rf.nextIndex))
+			HPrintf("%v %v:SENDS NEW ENTRY TO PEERS, index:%v, curTerm:%v, PEERS NUM:%v", rf.state, rf.me, newEntryIndex, rf.currentTerm, len(rf.nextIndex))
 			//processing
 			successInfoChan := make(chan bool, 1)
 			for peer, index := range rf.nextIndex {
@@ -442,13 +444,13 @@ func (rf *Raft) newEntryEventHandler() {
 					rf.matchIndex[peer] = newEntryIndex
 					continue
 				}
-				DPrintf("%v %v:INVOKE rf.appendNewEntry, curTerm:%v", rf.state, rf.me, rf.currentTerm)
+				HPrintf("%v %v:INVOKE rf.appendNewEntry, curTerm:%v", rf.state, rf.me, rf.currentTerm)
 
 				go rf.appendNewEntry(peer, index, newEntryIndex, successInfoChan)
 
 			}
 			rf.mu.Unlock()
-			DPrintf("%v %v:WAITING FOR SUCCESS COUNTING..., index:%v, curTerm:%v", rf.state, rf.me, newEntryIndex, rf.currentTerm)
+			HPrintf("%v %v:WAITING FOR SUCCESS COUNTING..., index:%v, curTerm:%v", rf.state, rf.me, newEntryIndex, rf.currentTerm)
 
 			successNum := 1
 			replyNum := 1
@@ -467,15 +469,18 @@ func (rf *Raft) newEntryEventHandler() {
 				}
 			}
 			if !committed {
-				DPrintf("%v %v:SUCCESS COUNTING END:FAILED, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
+				HPrintf("%v %v:SUCCESS COUNTING END:FAILED, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
 				continue
 			}
+			HPrintf("%v %v:before get that lock", rf.state, rf.me)
 			rf.mu.Lock()
+			HPrintf("%v %v:????????????????", rf.state, rf.me)
 			if rf.updateCommitIndex() {
 				rf.NewCommitInfoChan <- true
 			}
+			HPrintf("%v %v:////////////////", rf.state, rf.me)
 			rf.mu.Unlock()
-			DPrintf("%v %v:SUCCESS COUNTING END:SUCCESS, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
+			HPrintf("%v %v:SUCCESS COUNTING END:SUCCESS, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
 
 		case <-time.After(time.Duration(HEARTBEAT) * time.Millisecond):
 		}
@@ -537,6 +542,7 @@ func (rf *Raft) appendEntriesReplyHandler(replyChan chan *AppendEntriesReply) {
 		//todo handle appendEntries reply
 		//reply maybe nil due to network failure
 		if reply != nil && reply.Term > rf.currentTerm {
+			DPrintf("%v %v:appendEntriesReply: find a bigger term:%v, curTerm:%v", rf.state, rf.me, reply.Term, rf.currentTerm)
 			rf.mu.Lock()
 			rf.transferToFollower(reply.Term)
 			rf.mu.Unlock()
@@ -650,7 +656,7 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 			rf.state, rf.me, args.LeaderCommit, len(rf.log)-1, rf.currentTerm, rf.commitIndex)
 		rf.NewCommitInfoChan <- true //may deadlock due to Chan is full and blocked and lock is un-release
 	}
-	DPrintf("%v %v:SUCCESS UPDATE LOGS, curTerm:%v, commitIndex:%v", rf.state, rf.me, rf.currentTerm, rf.commitIndex)
+	HPrintf("%v %v:SUCCESS UPDATE LOGS, curTerm:%v, commitIndex:%v", rf.state, rf.me, rf.currentTerm, rf.commitIndex)
 	rf.printLogs()
 	return
 }
@@ -690,7 +696,7 @@ func (rf *Raft) transferToLeader() {
 	rf.TransferLeaderInfoChan <- true        //start leader routine
 	rf.mu.Unlock()
 	//DPrintf("%v %v:TRANSFER TO LEADER, noop Index:%v,curTerm:%v", rf.state, rf.me, noopIndex, rf.currentTerm)
-	DPrintf("%v %v:TRANSFER TO LEADER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
+	HPrintf("%v %v:TRANSFER TO LEADER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 }
 func (rf *Raft) doNoOp() int {
 	noopEntry := rf.makeNoOpEntry()
@@ -748,7 +754,7 @@ func (rf *Raft) transferToCandidate() (chan *RequestVoteReply, int) { //return r
 	rf.setPersistentState(rf.currentTerm+1, rf.me, nil)
 	term := rf.currentTerm
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
-	DPrintf("%v %v:TRANSFER TO CANDIDATE. currentTerm:%v", rf.state, rf.me, term)
+	HPrintf("%v %v:TRANSFER TO CANDIDATE. currentTerm:%v", rf.state, rf.me, term)
 	replyChan := rf.sendRequestVoteToPeersWithoutLock()
 	rf.mu.Unlock()
 	return replyChan, term
@@ -806,7 +812,7 @@ func (rf *Raft) transferToFollower(curTerm int) {
 	//rf.currentTerm = curTerm
 	//rf.votedFor = -1 //reset votedFor
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
-	DPrintf("%v %v:TRANSFER TO FOLLOWER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
+	HPrintf("%v %v:TRANSFER TO FOLLOWER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 }
 func (rf *Raft) makeVoidAppendEntriesArgForLeaderWithoutLock() *AppendEntriesArgs {
 	return &AppendEntriesArgs{
@@ -877,6 +883,7 @@ func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increm
 				return
 			}
 			DPrintf("%v %v:RECEIVE NewCommitInfo", rf.state, rf.me)
+			rf.sendHeartBeatToPeersWithoutLock()
 			for rf.commitIndex > rf.lastApplied {
 
 				DPrintf("%v %v:BEGIN TO APPLY", rf.state, rf.me)
@@ -890,7 +897,7 @@ func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increm
 				}
 
 				rf.applyCh <- msg
-				DPrintf("%v %v:APPLY COMPLETE, command:%v, command index:%v", rf.state, rf.me, msg.Command, msg.CommandIndex)
+				HPrintf("%v %v:APPLY COMPLETE, command:%v, command index:%v", rf.state, rf.me, msg.Command, msg.CommandIndex)
 			}
 			rf.mu.Unlock()
 		}
@@ -990,7 +997,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	//todo bugs may be here (nextIndex/Log)
-	GPrintf("%v %v:COME TO LIFE, currentTerm:%v, votedFor:%v", rf.state, rf.me, rf.currentTerm, rf.votedFor)
+	HPrintf("%v %v:COME TO LIFE, currentTerm:%v, votedFor:%v", rf.state, rf.me, rf.currentTerm, rf.votedFor)
 	rf.printLogs()
 	// start ticker goroutine to start elections
 	go rf.ticker()
@@ -1012,5 +1019,5 @@ func (rf *Raft) printLogs() {
 		//initialized to leader last log index + 1
 		res += fmt.Sprintf("|T:%v C:%v|", e.Term, e.Command)
 	}
-	DPrintf(res)
+	HPrintf(res)
 }
