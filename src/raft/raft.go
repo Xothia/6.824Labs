@@ -471,9 +471,9 @@ func (rf *Raft) newEntryEventHandler() {
 				continue
 			}
 			rf.mu.Lock()
-			for rf.updateCommitIndex() {
+			if rf.updateCommitIndex() {
+				rf.NewCommitInfoChan <- true
 			}
-			rf.NewCommitInfoChan <- true
 			rf.mu.Unlock()
 			DPrintf("%v %v:SUCCESS COUNTING END:SUCCESS, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
 
@@ -482,18 +482,20 @@ func (rf *Raft) newEntryEventHandler() {
 	}
 }
 func (rf *Raft) updateCommitIndex() bool {
-	N := rf.commitIndex + 1
-	sum := 0
-	for _, lastLogIndex := range rf.matchIndex {
-		if lastLogIndex >= N {
-			sum++
+	oldCommitIndex := rf.commitIndex
+	for N := rf.commitIndex + 1; N < len(rf.log); N++ {
+		sum := 0
+		for _, lastLogIndex := range rf.matchIndex {
+			if lastLogIndex >= N {
+				sum++
+			}
+		}
+		if sum >= rf.majorityNum && rf.log[N].Term == rf.currentTerm {
+			DPrintf("%v %v:UPDATE COMMIT INDEX SUCCESS, Old commitIndex:%v, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, N, rf.currentTerm)
+			rf.commitIndex = N
 		}
 	}
-	if sum >= rf.majorityNum && rf.log[N].Term == rf.currentTerm {
-		rf.commitIndex = N
-		return true
-	}
-	return false
+	return oldCommitIndex != rf.commitIndex
 }
 func (rf *Raft) makeAEArgsByIndex(beginIndex int, endIndex int) AppendEntriesArgs {
 	arg := AppendEntriesArgs{
@@ -969,7 +971,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]Entry, 0)
-	rf.appendLogWithoutLock(rf.makeNoOpEntry())
+	rf.log = append(rf.log, rf.makeNoOpEntry())
 	//Volatile state on all servers:
 	rf.commitIndex = 0
 	rf.lastApplied = 0
