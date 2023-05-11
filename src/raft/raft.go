@@ -319,10 +319,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = rf.appendLogWithoutLock(newEntry)
 	//info ae here comes a new log
 	HPrintf("%v %v:Start() is going to write NewEntryInfoChan, index:%v ,command:%v", rf.state, rf.me, index, command)
-	rf.NewEntryInfoChan <- index
-	// todo update nextIndex[]
 	HPrintf("%v %v:Start() is end, NewEntryInfoChan <- index, index:%v ,command:%v", rf.state, rf.me, index, command)
 	rf.printLogs()
+	// todo update nextIndex[]
+	rf.NewEntryInfoChan <- index
 	rf.mu.Unlock()
 	return index, term, isLeader
 }
@@ -353,7 +353,7 @@ func (rf *Raft) sendHeartBeatToPeersWithoutLock() {
 func (rf *Raft) heartBeatService() {
 	for {
 		time.Sleep(time.Duration(HEARTBEAT) * time.Millisecond)
-		DPrintf("%v %v:BEGIN SENDS HB TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
+		HPrintf("%v %v:BEGIN SENDS HB TO PEERS,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 		rf.mu.RLock()
 		if rf.state != LEADER || rf.killed() { //double check
 			rf.mu.RUnlock()
@@ -365,7 +365,10 @@ func (rf *Raft) heartBeatService() {
 	}
 }
 
-func (rf *Raft) appendNewEntry(peer int, index int, newEntryIndex int, successInfoChan chan<- bool) {
+func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan<- bool, terminateInfoChan <-chan bool) {
+	rf.mu.RLock()
+	index := rf.nextIndex[peer]
+	rf.mu.RUnlock()
 	FPrintf("%v %v:appendNewEntry has been called, term:%v, peer:%v, index:%v, newEntryIndex:%v",
 		rf.state, rf.me, rf.currentTerm, peer, index, newEntryIndex)
 	reply := AppendEntriesReply{
@@ -375,40 +378,45 @@ func (rf *Raft) appendNewEntry(peer int, index int, newEntryIndex int, successIn
 		Success:                false,
 	}
 	retryTimes := 0
-	MaxRetryTimes := 2
+	MaxRetryTimes := 6
 	oldTerm := rf.currentTerm
 	for !reply.Success && rf.state == LEADER && !rf.killed() { //until success or terminated
-		rf.mu.RLock()
-		arg := rf.makeAEArgsByIndex(index, newEntryIndex+1)
-		rf.mu.RUnlock()
+		select {
+		case <-terminateInfoChan:
+			return
+		default:
+			rf.mu.RLock()
+			arg := rf.makeAEArgsByIndex(index, newEntryIndex+1)
+			rf.mu.RUnlock()
 
-		ok := rf.sendAppendEntries(peer, &arg, &reply) //may return slowly
-		if !ok && retryTimes < MaxRetryTimes {
-			retryTimes++
-			FPrintf("%v %v:appendNewEntry failed due to network, retrying..., retrytime:%v, term:%v, peer:%v, index:%v, newEntryIndex:%v",
-				rf.state, rf.me, retryTimes, rf.currentTerm, peer, index, newEntryIndex)
-			continue //network fail retry at most MaxRetryTimes times
-		} else if retryTimes >= MaxRetryTimes {
-			DPrintf("%v %v:appendNewEntry FINAL failed STOP RETRY , index:%v", rf.state, rf.me, index)
-			break
-		}
-		if !reply.Success {
-			if index == 1 { // todo something went wrong
-				DPrintf("%v %v:appendNewEntry FINAL failed due to ???, index:%v", rf.state, rf.me, index)
+			ok := rf.sendAppendEntries(peer, &arg, &reply) //may return slowly
+			if !ok && retryTimes < MaxRetryTimes {
+				retryTimes++
+				FPrintf("%v %v:appendNewEntry failed due to network, retrying..., retrytime:%v, term:%v, peer:%v, index:%v, newEntryIndex:%v",
+					rf.state, rf.me, retryTimes, rf.currentTerm, peer, index, newEntryIndex)
+				continue //network fail retry at most MaxRetryTimes times
+			} else if retryTimes >= MaxRetryTimes {
+				DPrintf("%v %v:appendNewEntry FINAL failed STOP RETRY , index:%v", rf.state, rf.me, index)
 				break
 			}
-			// todo wait for optimize
-			if reply.ConflictTerm != -1 {
-				index = reply.ConflictTermFirstIndex
-				DPrintf("%v %v:appendNewEntry :reply.ConflictTerm:%v, ConflictTermFirstIndex:%v, index:%v", rf.state, rf.me, reply.ConflictTerm, reply.ConflictTermFirstIndex, index)
-			} else {
-				index--
+			if !reply.Success {
+				if index == 1 { // todo something went wrong
+					DPrintf("%v %v:appendNewEntry FINAL failed due to ???, index:%v", rf.state, rf.me, index)
+					break
+				}
+				// todo wait for optimize
+				if reply.ConflictTerm != -1 {
+					index = reply.ConflictTermFirstIndex
+					DPrintf("%v %v:appendNewEntry :reply.ConflictTerm:%v, ConflictTermFirstIndex:%v, index:%v", rf.state, rf.me, reply.ConflictTerm, reply.ConflictTermFirstIndex, index)
+				} else {
+					index--
+				}
+				//index--
+				rf.mu.Lock()
+				rf.nextIndex[peer] = index
+				rf.mu.Unlock()
+				DPrintf("%v %v:appendNewEntry FAILED, retry with index DECREMENT:%v", rf.state, rf.me, index)
 			}
-			//index--
-			rf.mu.Lock()
-			rf.nextIndex[peer] = index
-			rf.mu.Unlock()
-			DPrintf("%v %v:appendNewEntry FAILED, retry with index DECREMENT:%v", rf.state, rf.me, index)
 		}
 	}
 
@@ -425,85 +433,95 @@ func (rf *Raft) appendNewEntry(peer int, index int, newEntryIndex int, successIn
 	successInfoChan <- false
 }
 
+func (rf *Raft) sendAppendEntryToPeers(newEntryIndex int) (chan bool, chan bool) {
+	successInfoChan := make(chan bool, 1)
+	terminateAppendNewEntryInfoChan := make(chan bool, len(rf.peers))
+	for peer := range rf.peers {
+		if peer != rf.me {
+			HPrintf("%v %v:INVOKE rf.appendNewEntry, curTerm:%v", rf.state, rf.me, rf.currentTerm)
+			go rf.appendNewEntry(peer, newEntryIndex, successInfoChan, terminateAppendNewEntryInfoChan)
+		} else {
+			rf.nextIndex[peer] = newEntryIndex + 1
+			rf.matchIndex[peer] = newEntryIndex
+			continue
+		}
+	}
+	return successInfoChan, terminateAppendNewEntryInfoChan
+}
+func (rf *Raft) appendNewEntryReplyHandler(successInfoChan <-chan bool, terminateInfoChan <-chan bool) bool {
+	successNum := 1
+	replyNum := 1
+	committed := false
+	run := true
+	for run {
+		select {
+		case success := <-successInfoChan:
+			replyNum++
+			if success {
+				successNum++
+			}
+			if successNum >= rf.majorityNum { // committed
+				committed = true
+				run = false
+				break
+			}
+			if replyNum >= len(rf.peers) {
+				run = false
+				break
+			}
+		case <-terminateInfoChan:
+			run = false
+			break
+		}
+	}
+	return committed
+}
+
 func (rf *Raft) newEntryEventHandler() {
+	terminateReplyHandlerChan := make(chan bool, 0)
+	aReplyHandlerIsProcessing := false
+	var terminateSubRouInfoChan chan bool
+
 	for rf.state == LEADER && !rf.killed() {
 		select {
 		case newEntryIndex := <-rf.NewEntryInfoChan: //AEArgsChan
-			HPrintf("%v %v:!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!:%v", rf.state, rf.me, newEntryIndex)
 			rf.mu.Lock()
+			if aReplyHandlerIsProcessing {
+				terminateReplyHandlerChan <- true
+				for range rf.peers {
+					terminateSubRouInfoChan <- true
+				}
+				aReplyHandlerIsProcessing = false
+			}
+
 			if rf.state != LEADER || rf.killed() { //double check
 				rf.mu.Unlock()
-				break
+				return
 			}
 			HPrintf("%v %v:SENDS NEW ENTRY TO PEERS, index:%v, curTerm:%v, PEERS NUM:%v", rf.state, rf.me, newEntryIndex, rf.currentTerm, len(rf.nextIndex))
+
 			//processing
-			successInfoChan := make(chan bool, 1)
-			for peer, index := range rf.nextIndex {
-				if peer == rf.me {
-					rf.nextIndex[peer] = newEntryIndex + 1
-					rf.matchIndex[peer] = newEntryIndex
-					continue
-				}
-				HPrintf("%v %v:INVOKE rf.appendNewEntry, curTerm:%v", rf.state, rf.me, rf.currentTerm)
-
-				go rf.appendNewEntry(peer, index, newEntryIndex, successInfoChan)
-
-			}
+			successInfoChan, terminateAppendNewEntryInfoChan := rf.sendAppendEntryToPeers(newEntryIndex)
+			terminateSubRouInfoChan = terminateAppendNewEntryInfoChan
+			aReplyHandlerIsProcessing = true
 			rf.mu.Unlock()
+
 			HPrintf("%v %v:WAITING FOR SUCCESS COUNTING..., index:%v, curTerm:%v", rf.state, rf.me, newEntryIndex, rf.currentTerm)
-
-			successNum := 1
-			replyNum := 1
-			committed := false
-			//for success := range successInfoChan { //what if never success?
-			//	replyNum++
-			//	if success {
-			//		successNum++
-			//	}
-			//	if successNum >= rf.majorityNum { // committed
-			//		committed = true
-			//		break
-			//	}
-			//	if replyNum >= len(rf.peers) {
-			//		break
-			//	}
-			//}
-			run := true
-			for run {
-				select {
-				case success := <-successInfoChan:
-					replyNum++
-					if success {
-						successNum++
-					}
-					if successNum >= rf.majorityNum { // committed
-						committed = true
-						run = false
-						break
-					}
-					if replyNum >= len(rf.peers) {
-						run = false
-						break
-					}
-				case <-time.After(1000 * time.Millisecond):
-					run = false
-					break
+			go func(runFlag *bool) {
+				//will block
+				committed := rf.appendNewEntryReplyHandler(successInfoChan, terminateReplyHandlerChan)
+				*runFlag = false
+				if !committed {
+					HPrintf("%v %v:SUCCESS COUNTING END:FAILED, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
+					return
 				}
-
-			}
-			if !committed {
-				HPrintf("%v %v:SUCCESS COUNTING END:FAILED, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
-				continue
-			}
-			HPrintf("%v %v:before get that lock", rf.state, rf.me)
-			rf.mu.Lock()
-			HPrintf("%v %v:????????????????", rf.state, rf.me)
-			if rf.updateCommitIndex() {
-				rf.NewCommitInfoChan <- true
-			}
-			HPrintf("%v %v:////////////////", rf.state, rf.me)
-			rf.mu.Unlock()
-			HPrintf("%v %v:SUCCESS COUNTING END:SUCCESS, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
+				rf.mu.Lock()
+				if rf.updateCommitIndex() {
+					rf.NewCommitInfoChan <- true
+				}
+				rf.mu.Unlock()
+				HPrintf("%v %v:SUCCESS COUNTING END:SUCCESS, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
+			}(&aReplyHandlerIsProcessing)
 
 		case <-time.After(time.Duration(HEARTBEAT) * time.Millisecond):
 		}

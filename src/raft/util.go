@@ -6,7 +6,7 @@ import "log"
 const Debug = false
 const FDebug = false
 const GDebug = false
-const HDebug = false
+const HDebug = true
 
 func HPrintf(format string, a ...interface{}) (n int, err error) {
 	if HDebug {

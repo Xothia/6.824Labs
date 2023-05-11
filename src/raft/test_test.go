@@ -943,7 +943,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 				leader = i
 			}
 		}
-		fmt.Printf("1\n")
+		//fmt.Printf("1\n")
 
 		if (rand.Int() % 1000) < 100 {
 			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
@@ -952,30 +952,30 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			ms := (rand.Int63() % 13)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
-		fmt.Printf("2\n")
+		//fmt.Printf("2\n")
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
-			fmt.Printf("leader %v is disconnected.\n", leader)
+			//fmt.Printf("leader %v is disconnected.\n", leader)
 			cfg.disconnect(leader)
 			nup -= 1
 		}
-		fmt.Printf("3\n")
+		//fmt.Printf("3\n")
 
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
 				cfg.connect(s)
 				nup += 1
-				fmt.Printf("%v is connected.nup:%v\n", s, nup)
+				//fmt.Printf("%v is connected.nup:%v\n", s, nup)
 			}
 		}
 
-		for i, tr := range cfg.connected {
-			if tr {
-				fmt.Printf("%v, ", i)
-			}
-		}
-		fmt.Printf("is together.\niters END:%v.\n", iters)
+		//for i, tr := range cfg.connected {
+		//	if tr {
+		//		fmt.Printf("%v, ", i)
+		//	}
+		//}
+		//fmt.Printf("is together.\niters END:%v.\n", iters)
 	}
 
 	for i := 0; i < servers; i++ {
@@ -1004,6 +1004,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 
 	stop := int32(0)
 
+	fmt.Println("11111111111")
 	// create concurrent clients
 	cfn := func(me int, ch chan []int) {
 		var ret []int
@@ -1050,6 +1051,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 		}
 		ret = values
 	}
+	fmt.Println("22222222222")
 
 	ncli := 3
 	cha := []chan []int{}
@@ -1057,11 +1059,13 @@ func internalChurn(t *testing.T, unreliable bool) {
 		cha = append(cha, make(chan []int))
 		go cfn(i, cha[i])
 	}
+	fmt.Println("3333333333333")
 
 	for iters := 0; iters < 20; iters++ {
 		if (rand.Int() % 1000) < 200 {
 			i := rand.Int() % servers
 			cfg.disconnect(i)
+			fmt.Printf("%v is disconnect\n", i)
 		}
 
 		if (rand.Int() % 1000) < 500 {
@@ -1070,12 +1074,14 @@ func internalChurn(t *testing.T, unreliable bool) {
 				cfg.start1(i, cfg.applier)
 			}
 			cfg.connect(i)
+			fmt.Printf("%v is restart\n", i)
 		}
 
 		if (rand.Int() % 1000) < 200 {
 			i := rand.Int() % servers
 			if cfg.rafts[i] != nil {
 				cfg.crash1(i)
+				fmt.Printf("%v is shut down\n", i)
 			}
 		}
 
@@ -1085,6 +1091,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 		// the election timeout, but not hugely smaller.
 		time.Sleep((RaftElectionTimeout * 7) / 10)
 	}
+	fmt.Println("4444444444")
 
 	time.Sleep(RaftElectionTimeout)
 	cfg.setunreliable(false)
@@ -1096,6 +1103,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 	}
 
 	atomic.StoreInt32(&stop, 1)
+	fmt.Println("555555555555:every one is restart and commit is stop")
 
 	values := []int{}
 	for i := 0; i < ncli; i++ {
@@ -1108,7 +1116,9 @@ func internalChurn(t *testing.T, unreliable bool) {
 
 	time.Sleep(RaftElectionTimeout)
 
+	fmt.Println("66666666666666")
 	lastIndex := cfg.one(rand.Int(), servers, true)
+	fmt.Println("777777777777")
 
 	really := make([]int, lastIndex+1)
 	for index := 1; index <= lastIndex; index++ {
@@ -1119,6 +1129,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 			t.Fatalf("not an int")
 		}
 	}
+	fmt.Println("888888888888")
 
 	for _, v1 := range values {
 		ok := false
