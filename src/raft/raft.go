@@ -134,7 +134,7 @@ func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry) {
 		someThingChanged = true
 	}
 	if someThingChanged {
-		GPrintf("%v %v:SOME Thing Changed, currentTerm:%v ,votedFor:%v, log:%v", rf.state, rf.me, currentTerm, votedFor, log)
+		DPrintf("%v %v:SOME Thing Changed, currentTerm:%v ,votedFor:%v, log:%v", rf.state, rf.me, currentTerm, votedFor, log)
 		rf.persist()
 	}
 }
@@ -159,11 +159,11 @@ func (rf *Raft) persist() {
 	if e.Encode(rf.currentTerm) != nil ||
 		e.Encode(rf.votedFor) != nil ||
 		e.Encode(rf.log) != nil {
-		GPrintf("persist failed.")
+		DPrintf("persist failed.")
 	} else {
 		raftState := w.Bytes()
 		rf.persister.Save(raftState, nil)
-		GPrintf("persist success, raft state:%v", rf.persister.ReadRaftState())
+		DPrintf("persist success, raft state:%v", rf.persister.ReadRaftState())
 	}
 }
 
@@ -182,12 +182,12 @@ func (rf *Raft) readPersist(data []byte) {
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&log) != nil {
-		GPrintf("readPersist failed.")
+		DPrintf("readPersist failed.")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
-		GPrintf("readPersist success.currentTerm:%v,votedFor:%v,log:%v,date:%v", currentTerm, votedFor, log, data)
+		DPrintf("readPersist success.currentTerm:%v,votedFor:%v,log:%v,date:%v", currentTerm, votedFor, log, data)
 	}
 }
 
@@ -286,6 +286,14 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
+func (rf *Raft) lock(methodName string) {
+	rf.mu.Lock()
+	GPrintf("%v %v:%v get lock", rf.state, rf.me, methodName)
+}
+func (rf *Raft) unlock(methodName string) {
+	rf.mu.Unlock()
+	GPrintf("%v %v:%v release lock", rf.state, rf.me, methodName)
+}
 
 // Start
 // the service using Raft (e.g. a k/v server) wants to start
@@ -301,8 +309,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the second return value is the current term.
 // the third return value is true if this server believes it is the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	GPrintf("%v %v:Start() is invoked,command:%v", rf.state, rf.me, command)
 	rf.mu.Lock()
-	HPrintf("%v %v:Start() is invoked,command:%v", rf.state, rf.me, command)
 	index := -1
 	term := rf.currentTerm
 	isLeader := rf.isLeader()
@@ -318,12 +326,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	index = rf.appendLogWithoutLock(newEntry)
 	//info ae here comes a new log
-	HPrintf("%v %v:Start() is going to write NewEntryInfoChan, index:%v ,command:%v", rf.state, rf.me, index, command)
-	HPrintf("%v %v:Start() is end, NewEntryInfoChan <- index, index:%v ,command:%v", rf.state, rf.me, index, command)
+	GPrintf("%v %v:Start() is going to write NewEntryInfoChan, index:%v ,command:%v", rf.state, rf.me, index, command)
 	rf.printLogs()
 	// todo update nextIndex[]
 	rf.NewEntryInfoChan <- index
 	rf.mu.Unlock()
+	GPrintf("%v %v:Start() is end, NewEntryInfoChan <- index, index:%v ,command:%v", rf.state, rf.me, index, command)
 	return index, term, isLeader
 }
 
@@ -369,7 +377,7 @@ func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan
 	rf.mu.RLock()
 	index := rf.nextIndex[peer]
 	rf.mu.RUnlock()
-	FPrintf("%v %v:appendNewEntry has been called, term:%v, peer:%v, index:%v, newEntryIndex:%v",
+	DPrintf("%v %v:appendNewEntry has been called, term:%v, peer:%v, index:%v, newEntryIndex:%v",
 		rf.state, rf.me, rf.currentTerm, peer, index, newEntryIndex)
 	reply := AppendEntriesReply{
 		ConflictTerm:           -1,
@@ -385,6 +393,10 @@ func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan
 		case <-terminateInfoChan:
 			return
 		default:
+			if index == 0 || index > newEntryIndex+1 { // todo ??? index > newEntryIndex+1 ?
+				DPrintf("%v %v:appendNewEntry FINAL failed due to ???, index:%v", rf.state, rf.me, index)
+				break
+			}
 			rf.mu.RLock()
 			arg := rf.makeAEArgsByIndex(index, newEntryIndex+1)
 			rf.mu.RUnlock()
@@ -392,7 +404,7 @@ func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan
 			ok := rf.sendAppendEntries(peer, &arg, &reply) //may return slowly
 			if !ok && retryTimes < MaxRetryTimes {
 				retryTimes++
-				FPrintf("%v %v:appendNewEntry failed due to network, retrying..., retrytime:%v, term:%v, peer:%v, index:%v, newEntryIndex:%v",
+				DPrintf("%v %v:appendNewEntry failed due to network, retrying..., retrytime:%v, term:%v, peer:%v, index:%v, newEntryIndex:%v",
 					rf.state, rf.me, retryTimes, rf.currentTerm, peer, index, newEntryIndex)
 				continue //network fail retry at most MaxRetryTimes times
 			} else if retryTimes >= MaxRetryTimes {
@@ -400,10 +412,6 @@ func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan
 				break
 			}
 			if !reply.Success {
-				if index == 1 { // todo something went wrong
-					DPrintf("%v %v:appendNewEntry FINAL failed due to ???, index:%v", rf.state, rf.me, index)
-					break
-				}
 				// todo wait for optimize
 				if reply.ConflictTerm != -1 {
 					index = reply.ConflictTermFirstIndex
@@ -455,6 +463,9 @@ func (rf *Raft) appendNewEntryReplyHandler(successInfoChan <-chan bool, terminat
 	run := true
 	for run {
 		select {
+		case <-terminateInfoChan:
+			run = false
+			break
 		case success := <-successInfoChan:
 			replyNum++
 			if success {
@@ -469,9 +480,6 @@ func (rf *Raft) appendNewEntryReplyHandler(successInfoChan <-chan bool, terminat
 				run = false
 				break
 			}
-		case <-terminateInfoChan:
-			run = false
-			break
 		}
 	}
 	return committed
@@ -487,10 +495,9 @@ func (rf *Raft) newEntryEventHandler() {
 		case newEntryIndex := <-rf.NewEntryInfoChan: //AEArgsChan
 			rf.mu.Lock()
 			if aReplyHandlerIsProcessing {
-				terminateReplyHandlerChan <- true
-				for range rf.peers {
-					terminateSubRouInfoChan <- true
-				}
+				close(terminateReplyHandlerChan)
+				terminateReplyHandlerChan = make(chan bool, 0)
+				close(terminateSubRouInfoChan)
 				aReplyHandlerIsProcessing = false
 			}
 
@@ -549,7 +556,7 @@ func (rf *Raft) makeAEArgsByIndex(beginIndex int, endIndex int) AppendEntriesArg
 		LeaderId:     rf.me,
 		PrevLogIndex: beginIndex - 1,
 		PrevLogTerm:  rf.log[beginIndex-1].Term,
-		Entries:      rf.log[beginIndex:endIndex],
+		Entries:      rf.log[beginIndex:endIndex], //todo panic: runtime error: slice bounds out of range [39:38]
 		LeaderCommit: rf.commitIndex,
 	}
 	return arg
@@ -735,6 +742,9 @@ func (rf *Raft) transferToLeader() {
 	rf.sendHeartBeatToPeersWithoutLock()
 	rf.NewEntryInfoChan = make(chan int, 64) //reset NewEntryInfoChan
 	rf.TransferLeaderInfoChan <- true        //start leader routine
+	if rf.updateCommitIndex() {
+		rf.NewCommitInfoChan <- true
+	}
 	rf.mu.Unlock()
 	//DPrintf("%v %v:TRANSFER TO LEADER, noop Index:%v,curTerm:%v", rf.state, rf.me, noopIndex, rf.currentTerm)
 	HPrintf("%v %v:TRANSFER TO LEADER,curTerm:%v", rf.state, rf.me, rf.currentTerm)

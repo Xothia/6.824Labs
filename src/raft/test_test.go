@@ -931,7 +931,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
-		fmt.Printf("\niters:%v.\n", iters)
+		//fmt.Printf("\niters:%v.\n", iters)
 		if iters == 200 {
 			cfg.setlongreordering(true)
 			fmt.Printf("setlongreordering.\n")
@@ -1007,11 +1007,16 @@ func internalChurn(t *testing.T, unreliable bool) {
 	fmt.Println("11111111111")
 	// create concurrent clients
 	cfn := func(me int, ch chan []int) {
+		//fmt.Printf("%v cfn BEGIN\n", me)
 		var ret []int
 		ret = nil
-		defer func() { ch <- ret }()
+		defer func() {
+			//fmt.Printf("%v have returned\n", me)
+			ch <- ret
+		}()
 		values := []int{}
 		for atomic.LoadInt32(&stop) == 0 {
+			//fmt.Printf("\n FOR BEGIN\n")
 			x := rand.Int()
 			index := -1
 			ok := false
@@ -1021,7 +1026,10 @@ func internalChurn(t *testing.T, unreliable bool) {
 				rf := cfg.rafts[i]
 				cfg.mu.Unlock()
 				if rf != nil {
+					//fmt.Printf("\n%v Start is going to invoke\n", i)
 					index1, _, ok1 := rf.Start(x)
+					//fmt.Printf("\n%v Start have end\n", i)
+
 					if ok1 {
 						ok = ok1
 						index = index1
@@ -1048,6 +1056,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 			} else {
 				time.Sleep(time.Duration(79+me*17) * time.Millisecond)
 			}
+			//fmt.Printf("\nFOR END\n")
 		}
 		ret = values
 	}
@@ -1065,7 +1074,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 		if (rand.Int() % 1000) < 200 {
 			i := rand.Int() % servers
 			cfg.disconnect(i)
-			fmt.Printf("%v is disconnect\n", i)
+			//fmt.Printf("%v is disconnect\n", i)
 		}
 
 		if (rand.Int() % 1000) < 500 {
@@ -1074,14 +1083,14 @@ func internalChurn(t *testing.T, unreliable bool) {
 				cfg.start1(i, cfg.applier)
 			}
 			cfg.connect(i)
-			fmt.Printf("%v is restart\n", i)
+			//fmt.Printf("%v is restart\n", i)
 		}
 
 		if (rand.Int() % 1000) < 200 {
 			i := rand.Int() % servers
 			if cfg.rafts[i] != nil {
 				cfg.crash1(i)
-				fmt.Printf("%v is shut down\n", i)
+				//fmt.Printf("%v is shut down\n", i)
 			}
 		}
 
