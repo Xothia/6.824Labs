@@ -120,8 +120,9 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 // currentTerm:-1 for nil; voteFor:-2 for nil; log nil for nil
-func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry, lastIncludedIndex int) {
+func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry, lastIncludedIndex int, snapshot []byte) {
 	someThingChanged := false
+
 	if currentTerm > -1 {
 		rf.currentTerm = currentTerm
 		someThingChanged = true
@@ -140,7 +141,7 @@ func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry, l
 	}
 	if someThingChanged {
 		DPrintf("%v %v:SOME Thing Changed, currentTerm:%v ,votedFor:%v, log:%v", rf.state, rf.me, currentTerm, votedFor, log)
-		rf.persist()
+		rf.persist(snapshot)
 	}
 }
 
@@ -151,7 +152,7 @@ func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry, l
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
+func (rf *Raft) persist(snapshot []byte) {
 	// Your code here (2C).
 	// Example:
 	//rf.mu.RLock()
@@ -168,7 +169,7 @@ func (rf *Raft) persist() {
 		DPrintf("persist failed.")
 	} else {
 		raftState := w.Bytes()
-		rf.persister.Save(raftState, nil)
+		rf.persister.Save(raftState, snapshot)
 		DPrintf("persist success, raft state:%v", rf.persister.ReadRaftState())
 	}
 }
@@ -216,6 +217,12 @@ func (rf *Raft) local2logicIndex(localIndex int) int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	HPrintf("%v %v:Snapshot INVOKED, index:%v , curTerm:%v", rf.state, rf.me, index, rf.currentTerm)
+	rf.mu.Lock()
+	discardIndex := rf.logic2localIndex(index)
+	rf.setPersistentState(-1, -2, rf.log[discardIndex:], index, snapshot)
+	rf.mu.Unlock()
+	HPrintf("%v %v:Snapshot END, curTerm:%v", rf.state, rf.me, rf.currentTerm)
 
 }
 
@@ -407,13 +414,15 @@ func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan
 	retryTimes := 0
 	MaxRetryTimes := 6
 	oldTerm := rf.currentTerm
-	for !reply.Success && rf.state == LEADER && !rf.killed() { //until success or terminated
+	runFlag := true
+	for !reply.Success && rf.state == LEADER && !rf.killed() && runFlag { //until success or terminated
 		select {
 		case <-terminateInfoChan:
 			return
 		default:
-			if index == 0 || index > newEntryIndex+1 { // todo ??? index > newEntryIndex+1 ?
-				DPrintf("%v %v:appendNewEntry FINAL failed due to ???, index:%v", rf.state, rf.me, index)
+			if index <= rf.lastIncludedIndex || index > newEntryIndex+1 { // todo ??? index > newEntryIndex+1 ?
+				HPrintf("%v %v:appendNewEntry FINAL failed due to ???, index:%v", rf.state, rf.me, index)
+				runFlag = false
 				break
 			}
 			rf.mu.RLock()
@@ -428,6 +437,7 @@ func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan
 				continue //network fail retry at most MaxRetryTimes times
 			} else if retryTimes >= MaxRetryTimes {
 				DPrintf("%v %v:appendNewEntry FINAL failed STOP RETRY , index:%v", rf.state, rf.me, index)
+				runFlag = false
 				break
 			}
 			if !reply.Success {
@@ -532,13 +542,13 @@ func (rf *Raft) newEntryEventHandler() {
 			aReplyHandlerIsProcessing = true
 			rf.mu.Unlock()
 
-			HPrintf("%v %v:WAITING FOR SUCCESS COUNTING..., index:%v, curTerm:%v", rf.state, rf.me, newEntryIndex, rf.currentTerm)
+			HPrintf("%v %v:WAITING FOR appendNewEntry Reply..., index:%v, curTerm:%v", rf.state, rf.me, newEntryIndex, rf.currentTerm)
 			go func(runFlag *bool) {
 				//will block
 				committed := rf.appendNewEntryReplyHandler(successInfoChan, terminateReplyHandlerChan)
 				*runFlag = false
 				if !committed {
-					HPrintf("%v %v:SUCCESS COUNTING END:FAILED, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
+					HPrintf("%v %v:appendNewEntry Reply WAITING END:FAILED, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
 					return
 				}
 				rf.mu.Lock()
@@ -546,7 +556,7 @@ func (rf *Raft) newEntryEventHandler() {
 					rf.NewCommitInfoChan <- true
 				}
 				rf.mu.Unlock()
-				HPrintf("%v %v:SUCCESS COUNTING END:SUCCESS, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
+				HPrintf("%v %v:appendNewEntry Reply WAITING END:SUCCESS, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
 			}(&aReplyHandlerIsProcessing)
 
 		case <-time.After(time.Duration(HEARTBEAT) * time.Millisecond):
@@ -703,7 +713,7 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	for index, entry := range args.Entries {
 		if args.PrevLogIndex+index+1 >= rf.logicLogLen() || //illegal index
 			rf.log[rf.logic2localIndex(args.PrevLogIndex+index+1)].Term != entry.Term { //term unmatched
-			rf.setPersistentState(-1, -2, rf.log[:rf.logic2localIndex(args.PrevLogIndex+1)], -1) //delete logs after args.PrevLogIndex
+			rf.setPersistentState(-1, -2, rf.log[:rf.logic2localIndex(args.PrevLogIndex+1)], -1, nil) //delete logs after args.PrevLogIndex
 			//rf.log = rf.log[:args.PrevLogIndex+1] //delete logs after args.PrevLogIndex
 			matchFlag = false
 			break
@@ -739,7 +749,7 @@ func (rf *Raft) electionTimeoutEventHandler(terminateSignal <-chan bool) bool {
 	win := rf.handleVotes(voteReply, terminateSignal)
 	if !win { //do not win election
 		DPrintf("%v %v:LOSE ELECTION", rf.state, rf.me)
-		rf.setPersistentState(-1, -1, nil, -1)
+		rf.setPersistentState(-1, -1, nil, -1, nil)
 		//rf.votedFor = -1 //reset votedFor
 		return true
 	}
@@ -754,7 +764,7 @@ func (rf *Raft) transferToLeader() {
 	//todo no-op append entry
 	rf.mu.Lock()
 	rf.state = LEADER
-	rf.setPersistentState(-1, -2, nil, -1)
+	rf.setPersistentState(-1, -2, nil, -1, nil)
 	//rf.votedFor = -1 //reset votedFor
 	rf.reInitAfterElection()
 	//rf.doNoOp()
@@ -806,7 +816,7 @@ func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVot
 		return
 	}
 	//candidate up-to-date granted vote
-	rf.setPersistentState(-1, args.CandidateId, nil, -1)
+	rf.setPersistentState(-1, args.CandidateId, nil, -1, nil)
 	//rf.votedFor = args.CandidateId
 	reply.VoteGranted = true
 	reply.PeerId = rf.me
@@ -822,7 +832,7 @@ func (rf *Raft) transferToCandidate() (chan *RequestVoteReply, int) { //return r
 	rf.state = CANDIDATE
 	//rf.currentTerm++
 	//rf.votedFor = rf.me
-	rf.setPersistentState(rf.currentTerm+1, rf.me, nil, -1)
+	rf.setPersistentState(rf.currentTerm+1, rf.me, nil, -1, nil)
 	term := rf.currentTerm
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
 	HPrintf("%v %v:TRANSFER TO CANDIDATE. currentTerm:%v", rf.state, rf.me, term)
@@ -879,7 +889,7 @@ func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply, terminateSignal <-
 
 func (rf *Raft) transferToFollower(curTerm int) {
 	rf.state = FOLLOWER
-	rf.setPersistentState(curTerm, -1, nil, -1)
+	rf.setPersistentState(curTerm, -1, nil, -1, nil)
 	//rf.currentTerm = curTerm
 	//rf.votedFor = -1 //reset votedFor
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
@@ -949,14 +959,14 @@ func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increm
 	for rf.killed() == false {
 		select {
 		case <-rf.NewCommitInfoChan:
-			rf.mu.Lock()
+			//rf.mu.Lock()
 			if rf.killed() {
-				rf.mu.Unlock()
+				//rf.mu.Unlock()
 				return
 			}
 			DPrintf("%v %v:RECEIVE NewCommitInfo", rf.state, rf.me)
 			//rf.sendHeartBeatToPeersWithoutLock()
-			for rf.commitIndex > rf.lastApplied {
+			for rf.commitIndex > rf.lastApplied && !rf.killed() {
 
 				DPrintf("%v %v:BEGIN TO APPLY", rf.state, rf.me)
 
@@ -967,11 +977,10 @@ func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increm
 					Command:      entry.Command,
 					CommandIndex: rf.lastApplied,
 				}
-
 				rf.applyCh <- msg
 				HPrintf("%v %v:APPLY COMPLETE, command:%v, command index:%v", rf.state, rf.me, msg.Command, msg.CommandIndex)
 			}
-			rf.mu.Unlock()
+			//rf.mu.Unlock()
 		}
 	}
 }
@@ -999,7 +1008,7 @@ func (rf *Raft) resetTicker(lowerBound int64, upperBound int64) {
 }
 
 func (rf *Raft) appendLogWithoutLock(e Entry) int {
-	rf.setPersistentState(-1, -2, append(rf.log, e), -1) //delete logs after args.PrevLogIndex
+	rf.setPersistentState(-1, -2, append(rf.log, e), -1, nil) //delete logs after args.PrevLogIndex
 	//rf.log = append(rf.log, e)
 	return rf.logicLogLen() - 1
 }
@@ -1088,7 +1097,7 @@ func (rf *Raft) reInitAfterElection() {
 	rf.matchIndex = make([]int, len(rf.peers)) //initialized to 0
 }
 func (rf *Raft) printLogs() {
-	res := ""
+	res := fmt.Sprintf("%v %v:", rf.state, rf.me)
 	for _, e := range rf.log {
 		//initialized to leader last log index + 1
 		res += fmt.Sprintf("|T:%v C:%v|", e.Term, e.Command)
