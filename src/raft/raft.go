@@ -90,9 +90,10 @@ type Raft struct {
 	//State:
 	state string
 	//Persistent state on all servers: Updated on stable storage before responding to RPCs
-	currentTerm int
-	votedFor    int
-	log         []Entry
+	currentTerm       int
+	votedFor          int
+	log               []Entry
+	lastIncludedIndex int
 	//Volatile state on all servers:
 	commitIndex int
 	lastApplied int
@@ -119,7 +120,7 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 // currentTerm:-1 for nil; voteFor:-2 for nil; log nil for nil
-func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry) {
+func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry, lastIncludedIndex int) {
 	someThingChanged := false
 	if currentTerm > -1 {
 		rf.currentTerm = currentTerm
@@ -131,6 +132,10 @@ func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry) {
 	}
 	if log != nil {
 		rf.log = log
+		someThingChanged = true
+	}
+	if lastIncludedIndex > -1 {
+		rf.lastIncludedIndex = lastIncludedIndex
 		someThingChanged = true
 	}
 	if someThingChanged {
@@ -158,7 +163,8 @@ func (rf *Raft) persist() {
 	//log         []Entry
 	if e.Encode(rf.currentTerm) != nil ||
 		e.Encode(rf.votedFor) != nil ||
-		e.Encode(rf.log) != nil {
+		e.Encode(rf.log) != nil ||
+		e.Encode(rf.lastIncludedIndex) != nil {
 		DPrintf("persist failed.")
 	} else {
 		raftState := w.Bytes()
@@ -179,16 +185,23 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []Entry
+	var lastIncludedIndex int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&log) != nil ||
+		d.Decode(&lastIncludedIndex) != nil {
 		DPrintf("readPersist failed.")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.lastIncludedIndex = lastIncludedIndex
 		DPrintf("readPersist success.currentTerm:%v,votedFor:%v,log:%v,date:%v", currentTerm, votedFor, log, data)
 	}
+}
+
+func (rf *Raft) logLen() int {
+	return len(rf.log) + rf.lastIncludedIndex
 }
 
 // Snapshot the service says it has created a snapshot that has
@@ -684,7 +697,7 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	for index, entry := range args.Entries {
 		if args.PrevLogIndex+index+1 >= len(rf.log) || //illegal index
 			rf.log[args.PrevLogIndex+index+1].Term != entry.Term { //term unmatched
-			rf.setPersistentState(-1, -2, rf.log[:args.PrevLogIndex+1]) //delete logs after args.PrevLogIndex
+			rf.setPersistentState(-1, -2, rf.log[:args.PrevLogIndex+1], -1) //delete logs after args.PrevLogIndex
 			//rf.log = rf.log[:args.PrevLogIndex+1] //delete logs after args.PrevLogIndex
 			matchFlag = false
 			break
@@ -720,7 +733,7 @@ func (rf *Raft) electionTimeoutEventHandler(terminateSignal <-chan bool) bool {
 	win := rf.handleVotes(voteReply, terminateSignal)
 	if !win { //do not win election
 		DPrintf("%v %v:LOSE ELECTION", rf.state, rf.me)
-		rf.setPersistentState(-1, -1, nil)
+		rf.setPersistentState(-1, -1, nil, -1)
 		//rf.votedFor = -1 //reset votedFor
 		return true
 	}
@@ -735,7 +748,7 @@ func (rf *Raft) transferToLeader() {
 	//todo no-op append entry
 	rf.mu.Lock()
 	rf.state = LEADER
-	rf.setPersistentState(-1, -2, nil)
+	rf.setPersistentState(-1, -2, nil, -1)
 	//rf.votedFor = -1 //reset votedFor
 	rf.reInitAfterElection()
 	//rf.doNoOp()
@@ -786,7 +799,7 @@ func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVot
 		return
 	}
 	//candidate up-to-date granted vote
-	rf.setPersistentState(-1, args.CandidateId, nil)
+	rf.setPersistentState(-1, args.CandidateId, nil, -1)
 	//rf.votedFor = args.CandidateId
 	reply.VoteGranted = true
 	reply.PeerId = rf.me
@@ -802,7 +815,7 @@ func (rf *Raft) transferToCandidate() (chan *RequestVoteReply, int) { //return r
 	rf.state = CANDIDATE
 	//rf.currentTerm++
 	//rf.votedFor = rf.me
-	rf.setPersistentState(rf.currentTerm+1, rf.me, nil)
+	rf.setPersistentState(rf.currentTerm+1, rf.me, nil, -1)
 	term := rf.currentTerm
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
 	HPrintf("%v %v:TRANSFER TO CANDIDATE. currentTerm:%v", rf.state, rf.me, term)
@@ -859,7 +872,7 @@ func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply, terminateSignal <-
 
 func (rf *Raft) transferToFollower(curTerm int) {
 	rf.state = FOLLOWER
-	rf.setPersistentState(curTerm, -1, nil)
+	rf.setPersistentState(curTerm, -1, nil, -1)
 	//rf.currentTerm = curTerm
 	//rf.votedFor = -1 //reset votedFor
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
@@ -978,7 +991,7 @@ func (rf *Raft) resetTicker(lowerBound int64, upperBound int64) {
 }
 
 func (rf *Raft) appendLogWithoutLock(e Entry) int {
-	rf.setPersistentState(-1, -2, append(rf.log, e)) //delete logs after args.PrevLogIndex
+	rf.setPersistentState(-1, -2, append(rf.log, e), -1) //delete logs after args.PrevLogIndex
 	//rf.log = append(rf.log, e)
 	return len(rf.log) - 1
 }
@@ -1030,6 +1043,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.log = make([]Entry, 0)
 	rf.log = append(rf.log, rf.makeNoOpEntry())
+	rf.lastIncludedIndex = 0
 	//Volatile state on all servers:
 	rf.commitIndex = 0
 	rf.lastApplied = 0
