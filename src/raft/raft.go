@@ -200,8 +200,14 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-func (rf *Raft) logLen() int {
+func (rf *Raft) logicLogLen() int {
 	return len(rf.log) + rf.lastIncludedIndex
+}
+func (rf *Raft) logic2localIndex(logicIndex int) int {
+	return logicIndex - rf.lastIncludedIndex
+}
+func (rf *Raft) local2logicIndex(localIndex int) int {
+	return localIndex + rf.lastIncludedIndex
 }
 
 // Snapshot the service says it has created a snapshot that has
@@ -549,14 +555,14 @@ func (rf *Raft) newEntryEventHandler() {
 }
 func (rf *Raft) updateCommitIndex() bool {
 	oldCommitIndex := rf.commitIndex
-	for N := rf.commitIndex + 1; N < len(rf.log); N++ {
+	for N := rf.commitIndex + 1; N < rf.logicLogLen(); N++ {
 		sum := 0
 		for _, lastLogIndex := range rf.matchIndex {
 			if lastLogIndex >= N {
 				sum++
 			}
 		}
-		if sum >= rf.majorityNum && rf.log[N].Term == rf.currentTerm {
+		if sum >= rf.majorityNum && rf.log[rf.logic2localIndex(N)].Term == rf.currentTerm {
 			DPrintf("%v %v:UPDATE COMMIT INDEX SUCCESS, Old commitIndex:%v, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, N, rf.currentTerm)
 			rf.commitIndex = N
 		}
@@ -568,8 +574,8 @@ func (rf *Raft) makeAEArgsByIndex(beginIndex int, endIndex int) AppendEntriesArg
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: beginIndex - 1,
-		PrevLogTerm:  rf.log[beginIndex-1].Term,
-		Entries:      rf.log[beginIndex:endIndex], //todo panic: runtime error: slice bounds out of range [39:38]
+		PrevLogTerm:  rf.log[rf.logic2localIndex(beginIndex-1)].Term,
+		Entries:      rf.log[rf.logic2localIndex(beginIndex):rf.logic2localIndex(endIndex)], //todo panic: runtime error: slice bounds out of range [39:38]
 		LeaderCommit: rf.commitIndex,
 	}
 	return arg
@@ -666,12 +672,12 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 		reply.ConflictTermFirstIndex = lastLogIndex + 1
 		return
 	}
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // todo panic: runtime error: index out of range [2] with length 2
+	if rf.log[rf.logic2localIndex(args.PrevLogIndex)].Term != args.PrevLogTerm { // todo panic: runtime error: index out of range [2] with length 2
 		//optimize quickly over incorrect
-		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+		reply.ConflictTerm = rf.log[rf.logic2localIndex(args.PrevLogIndex)].Term
 		for index, entry := range rf.log {
 			if entry.Term == reply.ConflictTerm {
-				reply.ConflictTermFirstIndex = index
+				reply.ConflictTermFirstIndex = rf.local2logicIndex(index)
 				break
 			}
 		}
@@ -681,9 +687,9 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 
 	if args.Entries == nil { //a heartbeat signal BUT THIS PLACE IS WRONG
 		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = Min(args.LeaderCommit, len(rf.log)-1)
+			rf.commitIndex = Min(args.LeaderCommit, rf.logicLogLen()-1)
 			DPrintf("%v %v:UPDATE COMMIT INDEX DRIVE BY HB, args.LeaderCommit:%v, len(rf.log)-1:%v,curTerm:%v, commitIndex:%v",
-				rf.state, rf.me, args.LeaderCommit, len(rf.log)-1, rf.currentTerm, rf.commitIndex)
+				rf.state, rf.me, args.LeaderCommit, rf.logicLogLen()-1, rf.currentTerm, rf.commitIndex)
 			rf.NewCommitInfoChan <- true
 		}
 		return
@@ -695,9 +701,9 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	//if match then do nothing else del and append
 	matchFlag := true
 	for index, entry := range args.Entries {
-		if args.PrevLogIndex+index+1 >= len(rf.log) || //illegal index
-			rf.log[args.PrevLogIndex+index+1].Term != entry.Term { //term unmatched
-			rf.setPersistentState(-1, -2, rf.log[:args.PrevLogIndex+1], -1) //delete logs after args.PrevLogIndex
+		if args.PrevLogIndex+index+1 >= rf.logicLogLen() || //illegal index
+			rf.log[rf.logic2localIndex(args.PrevLogIndex+index+1)].Term != entry.Term { //term unmatched
+			rf.setPersistentState(-1, -2, rf.log[:rf.logic2localIndex(args.PrevLogIndex+1)], -1) //delete logs after args.PrevLogIndex
 			//rf.log = rf.log[:args.PrevLogIndex+1] //delete logs after args.PrevLogIndex
 			matchFlag = false
 			break
@@ -712,9 +718,9 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	}
 	//update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = Min(args.LeaderCommit, len(rf.log)-1)
+		rf.commitIndex = Min(args.LeaderCommit, rf.logicLogLen()-1)
 		DPrintf("%v %v:UPDATE COMMIT INDEX, args.LeaderCommit:%v, newLastIndex:%v, curTerm:%v, commitIndex:%v",
-			rf.state, rf.me, args.LeaderCommit, len(rf.log)-1, rf.currentTerm, rf.commitIndex)
+			rf.state, rf.me, args.LeaderCommit, rf.logicLogLen()-1, rf.currentTerm, rf.commitIndex)
 		rf.NewCommitInfoChan <- true //may deadlock due to Chan is full and blocked and lock is un-release
 	}
 	HPrintf("%v %v:SUCCESS UPDATE LOGS, curTerm:%v, commitIndex:%v", rf.state, rf.me, rf.currentTerm, rf.commitIndex)
@@ -762,13 +768,14 @@ func (rf *Raft) transferToLeader() {
 	//DPrintf("%v %v:TRANSFER TO LEADER, noop Index:%v,curTerm:%v", rf.state, rf.me, noopIndex, rf.currentTerm)
 	HPrintf("%v %v:TRANSFER TO LEADER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 }
-func (rf *Raft) doNoOp() int {
-	noopEntry := rf.makeNoOpEntry()
-	index := rf.appendLogWithoutLock(noopEntry)
-	//info ae here comes a new log
-	rf.NewEntryInfoChan <- index
-	return index
-}
+
+//func (rf *Raft) doNoOp() int {
+//	noopEntry := rf.makeNoOpEntry()
+//	index := rf.appendLogWithoutLock(noopEntry)
+//	//info ae here comes a new log
+//	rf.NewEntryInfoChan <- index
+//	return index
+//}
 
 func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
@@ -879,11 +886,12 @@ func (rf *Raft) transferToFollower(curTerm int) {
 	HPrintf("%v %v:TRANSFER TO FOLLOWER,curTerm:%v", rf.state, rf.me, rf.currentTerm)
 }
 func (rf *Raft) makeVoidAppendEntriesArgForLeaderWithoutLock() *AppendEntriesArgs {
+	prev := rf.logicLogLen() - 1
 	return &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
-		PrevLogIndex: len(rf.log) - 1,
-		PrevLogTerm:  rf.log[len(rf.log)-1].Term,
+		PrevLogIndex: prev,
+		PrevLogTerm:  rf.log[rf.logic2localIndex(prev)].Term,
 		Entries:      nil,
 		LeaderCommit: rf.commitIndex,
 	}
@@ -953,7 +961,7 @@ func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increm
 				DPrintf("%v %v:BEGIN TO APPLY", rf.state, rf.me)
 
 				rf.lastApplied++
-				entry := rf.log[rf.lastApplied] // todo runtime error: index out of range [2] with length 2
+				entry := rf.log[rf.logic2localIndex(rf.lastApplied)] // todo runtime error: index out of range [2] with length 2
 				msg := ApplyMsg{
 					CommandValid: true,
 					Command:      entry.Command,
@@ -993,10 +1001,11 @@ func (rf *Raft) resetTicker(lowerBound int64, upperBound int64) {
 func (rf *Raft) appendLogWithoutLock(e Entry) int {
 	rf.setPersistentState(-1, -2, append(rf.log, e), -1) //delete logs after args.PrevLogIndex
 	//rf.log = append(rf.log, e)
-	return len(rf.log) - 1
+	return rf.logicLogLen() - 1
 }
 func (rf *Raft) getLastLogWithoutLock() (int, Entry) {
-	return len(rf.log) - 1, rf.log[len(rf.log)-1] //return index and lastLog
+	last := rf.logicLogLen() - 1
+	return last, rf.log[rf.logic2localIndex(last)] //return index and lastLog
 }
 func (rf *Raft) isCandidate() bool {
 	return rf.state == CANDIDATE
@@ -1051,7 +1060,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
 		//initialized to leader last log index + 1
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = rf.logicLogLen()
 	}
 	rf.matchIndex = make([]int, len(rf.peers)) //initialized to 0
 	//other const
