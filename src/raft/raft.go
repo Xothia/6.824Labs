@@ -211,6 +211,68 @@ func (rf *Raft) local2logicIndex(localIndex int) int {
 	return localIndex + rf.lastIncludedIndex
 }
 
+type InstallSnapshotArgs struct {
+	Term              int //leader’s term
+	LeaderId          int //so follower can redirect clients
+	LastIncludedIndex int
+	LastIncludedTerm  int //term of lastIncludedIndex
+	Snapshot          []byte
+}
+type InstallSnapshotReply struct {
+	Term int //currentTerm, for leader to update itself
+}
+
+func (rf *Raft) callInstallSnapshot(server int, args *InstallSnapshotArgs) (ok bool, reply *InstallSnapshotReply) {
+	reply = new(InstallSnapshotReply)
+	ok = rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		rf.mu.Unlock()
+		return
+	}
+	reLastIn := args.LastIncludedIndex
+	if reLastIn < rf.lastIncludedIndex {
+		rf.mu.Unlock()
+		return
+	}
+	newLogs := make([]Entry, 0)
+	newLogs = append(newLogs, Entry{
+		Term:    args.LastIncludedTerm,
+		Command: nil,
+	})
+
+	if rf.lastIncludedIndex <= reLastIn && reLastIn < rf.logicLogLen() &&
+		rf.log[rf.logic2localIndex(reLastIn)].Term == args.LastIncludedTerm {
+		//contains last included entry means: THAT entry is committed and applied
+		//rf.commitIndex = Max(reLastIn, rf.commitIndex)
+		newLogs = rf.log[rf.logic2localIndex(reLastIn):]
+	}
+
+	rf.commitIndex = reLastIn
+	rf.lastApplied = reLastIn
+	rf.setPersistentState(-1, -2, newLogs, reLastIn, args.Snapshot)
+	for i := 0; i < len(rf.NewCommitInfoChan); i++ {
+		<-rf.NewCommitInfoChan
+	}
+
+	//send snapshot for service to update
+	applyMsg := ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Snapshot,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+	rf.mu.Unlock()
+	rf.applyCh <- applyMsg
+	HPrintf("%v %v:SUCCESS Install Snapshot, curTerm:%v", rf.state, rf.me, rf.currentTerm)
+
+}
+
 // Snapshot the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -223,7 +285,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.setPersistentState(-1, -2, rf.log[discardIndex:], index, snapshot)
 	rf.mu.Unlock()
 	HPrintf("%v %v:Snapshot END, curTerm:%v", rf.state, rf.me, rf.currentTerm)
-
 }
 
 type AppendEntriesArgs struct {
@@ -399,12 +460,12 @@ func (rf *Raft) heartBeatService() {
 	}
 }
 
-func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan<- bool, terminateInfoChan <-chan bool) {
+func (rf *Raft) appendNewEntry(peer int, tempLog []Entry, newEntryIndex int, successInfoChan chan<- bool, terminateInfoChan <-chan bool) {
 	rf.mu.RLock()
 	index := rf.nextIndex[peer]
 	rf.mu.RUnlock()
-	DPrintf("%v %v:appendNewEntry has been called, term:%v, peer:%v, index:%v, newEntryIndex:%v",
-		rf.state, rf.me, rf.currentTerm, peer, index, newEntryIndex)
+	HPrintf("%v %v:appendNewEntry to %v has been called, term:%v, index:%v, newEntryIndex:%v",
+		rf.state, rf.me, peer, rf.currentTerm, index, newEntryIndex)
 	reply := AppendEntriesReply{
 		ConflictTerm:           -1,
 		ConflictTermFirstIndex: -1,
@@ -420,14 +481,50 @@ func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan
 		case <-terminateInfoChan:
 			return
 		default:
-			if index <= rf.lastIncludedIndex || index > newEntryIndex+1 { // todo ??? index > newEntryIndex+1 ?
-				HPrintf("%v %v:appendNewEntry FINAL failed due to ???, index:%v", rf.state, rf.me, index)
+			rf.mu.Lock()
+			//if index <= rf.lastIncludedIndex || index > newEntryIndex+1 { // todo ??? index > newEntryIndex+1 ?
+			if index > newEntryIndex+1 {
+				HPrintf("%v %v:appendNewEntry to %v FINAL failed due to ???, index:%v, newEntryIndex+1:%v", rf.state, rf.me, peer, index, newEntryIndex+1)
 				runFlag = false
+				rf.mu.Unlock()
 				break
 			}
-			rf.mu.RLock()
-			arg := rf.makeAEArgsByIndex(index, newEntryIndex+1)
-			rf.mu.RUnlock()
+			if index <= rf.lastIncludedIndex {
+				HPrintf("%v %v:appendNewEntry to %v failed due to left behind try install snapshot, index:%v, newEntryIndex+1:%v", rf.state, rf.me, peer, index, newEntryIndex+1)
+				rf.mu.Unlock()
+				// todo what if never return
+				// todo need to be done
+				ok, iSReply := rf.callInstallSnapshot(peer, &InstallSnapshotArgs{
+					Term:              rf.currentTerm,
+					LeaderId:          rf.me,
+					LastIncludedIndex: rf.lastIncludedIndex,
+					LastIncludedTerm:  rf.log[0].Term,
+					Snapshot:          rf.persister.ReadSnapshot(),
+				})
+
+				rf.mu.Lock()
+				if !ok { //network failed
+					//index = rf.logicLogLen()
+					rf.mu.Unlock()
+					return
+				}
+				if iSReply.Term > rf.currentTerm {
+					DPrintf("%v %v:appendEntriesReply: callInstallSnapshot find a bigger term:%v, curTerm:%v", rf.state, rf.me, iSReply.Term, rf.currentTerm)
+					rf.transferToFollower(iSReply.Term)
+					rf.mu.Unlock()
+					return
+				}
+				rf.nextIndex[peer] = newEntryIndex + 1
+				rf.matchIndex[peer] = newEntryIndex
+				rf.mu.Unlock()
+				successInfoChan <- true
+				HPrintf("%v %v:appendNewEntry FINAL SUCCESS because callInstallSnapshot, index:%v", rf.state, rf.me, index)
+				return
+			}
+			//}
+
+			arg := rf.makeAEArgsByIndex(index, newEntryIndex+1, tempLog)
+			rf.mu.Unlock()
 
 			ok := rf.sendAppendEntries(peer, &arg, &reply) //may return slowly
 			if !ok && retryTimes < MaxRetryTimes {
@@ -440,11 +537,12 @@ func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan
 				runFlag = false
 				break
 			}
-			if !reply.Success {
+
+			if !reply.Success && len(terminateInfoChan) == 0 {
 				// todo wait for optimize
 				if reply.ConflictTerm != -1 {
 					index = reply.ConflictTermFirstIndex
-					DPrintf("%v %v:appendNewEntry :reply.ConflictTerm:%v, ConflictTermFirstIndex:%v, index:%v", rf.state, rf.me, reply.ConflictTerm, reply.ConflictTermFirstIndex, index)
+					HPrintf("%v %v:appendNewEntry :reply.ConflictTerm:%v, ConflictTermFirstIndex:%v, index:%v", rf.state, rf.me, reply.ConflictTerm, reply.ConflictTermFirstIndex, index)
 				} else {
 					index--
 				}
@@ -452,18 +550,23 @@ func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan
 				rf.mu.Lock()
 				rf.nextIndex[peer] = index
 				rf.mu.Unlock()
-				DPrintf("%v %v:appendNewEntry FAILED, retry with index DECREMENT:%v", rf.state, rf.me, index)
+				HPrintf("%v %v:appendNewEntry FAILED, retry with index DECREMENT:%v", rf.state, rf.me, index)
 			}
 		}
 	}
 
 	if reply.Success && rf.state == LEADER && rf.currentTerm == oldTerm && !rf.killed() { // update nextIndex[] matchIndex
 		rf.mu.Lock()
-		rf.nextIndex[peer] = newEntryIndex + 1
-		rf.matchIndex[peer] = newEntryIndex
+		if newEntryIndex+1 > rf.nextIndex[peer] {
+			rf.nextIndex[peer] = newEntryIndex + 1
+		}
+		if newEntryIndex > rf.matchIndex[peer] {
+			rf.matchIndex[peer] = newEntryIndex
+		}
 		rf.mu.Unlock()
 		successInfoChan <- true
-		DPrintf("%v %v:appendNewEntry FINAL SUCCESS, index:%v", rf.state, rf.me, index)
+		HPrintf("%v %v:appendNewEntry to %v FINAL SUCCESS, index:%v, new next Index:%v",
+			rf.state, rf.me, peer, index, rf.nextIndex[peer])
 		return
 	}
 	DPrintf("%v %v:appendNewEntry TO %v FINAL failed, index:%v", rf.state, rf.me, peer, index)
@@ -473,10 +576,11 @@ func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan
 func (rf *Raft) sendAppendEntryToPeers(newEntryIndex int) (chan bool, chan bool) {
 	successInfoChan := make(chan bool, 1)
 	terminateAppendNewEntryInfoChan := make(chan bool, len(rf.peers))
+	tempLog := rf.log[:]
 	for peer := range rf.peers {
 		if peer != rf.me {
-			HPrintf("%v %v:INVOKE rf.appendNewEntry, curTerm:%v", rf.state, rf.me, rf.currentTerm)
-			go rf.appendNewEntry(peer, newEntryIndex, successInfoChan, terminateAppendNewEntryInfoChan)
+			HPrintf("%v %v:INVOKE rf.appendNewEntry(peer:%v, newEntryIndex:%v), curTerm:%v", rf.state, rf.me, peer, newEntryIndex, rf.currentTerm)
+			go rf.appendNewEntry(peer, tempLog, newEntryIndex, successInfoChan, terminateAppendNewEntryInfoChan)
 		} else {
 			rf.nextIndex[peer] = newEntryIndex + 1
 			rf.matchIndex[peer] = newEntryIndex
@@ -523,6 +627,9 @@ func (rf *Raft) newEntryEventHandler() {
 		select {
 		case newEntryIndex := <-rf.NewEntryInfoChan: //AEArgsChan
 			rf.mu.Lock()
+			for i := 0; i < len(rf.NewEntryInfoChan); i++ {
+				newEntryIndex = <-rf.NewEntryInfoChan
+			}
 			if aReplyHandlerIsProcessing {
 				close(terminateReplyHandlerChan)
 				terminateReplyHandlerChan = make(chan bool, 0)
@@ -579,7 +686,7 @@ func (rf *Raft) updateCommitIndex() bool {
 	}
 	return oldCommitIndex != rf.commitIndex
 }
-func (rf *Raft) makeAEArgsByIndex(beginIndex int, endIndex int) AppendEntriesArgs {
+func (rf *Raft) makeAEArgsByIndex(beginIndex int, endIndex int, tempLog []Entry) AppendEntriesArgs {
 	arg := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -682,7 +789,8 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 		reply.ConflictTermFirstIndex = lastLogIndex + 1
 		return
 	}
-	if rf.log[rf.logic2localIndex(args.PrevLogIndex)].Term != args.PrevLogTerm { // todo panic: runtime error: index out of range [2] with length 2
+	if rf.logic2localIndex(args.PrevLogIndex) > 0 &&
+		rf.log[rf.logic2localIndex(args.PrevLogIndex)].Term != args.PrevLogTerm { // todo panic: runtime error: index out of range [2] with length 2
 		//optimize quickly over incorrect
 		reply.ConflictTerm = rf.log[rf.logic2localIndex(args.PrevLogIndex)].Term
 		for index, entry := range rf.log {
@@ -959,28 +1067,26 @@ func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increm
 	for rf.killed() == false {
 		select {
 		case <-rf.NewCommitInfoChan:
-			//rf.mu.Lock()
-			if rf.killed() {
-				//rf.mu.Unlock()
-				return
-			}
 			DPrintf("%v %v:RECEIVE NewCommitInfo", rf.state, rf.me)
-			//rf.sendHeartBeatToPeersWithoutLock()
-			for rf.commitIndex > rf.lastApplied && !rf.killed() {
-
-				DPrintf("%v %v:BEGIN TO APPLY", rf.state, rf.me)
-
-				rf.lastApplied++
-				entry := rf.log[rf.logic2localIndex(rf.lastApplied)] // todo runtime error: index out of range [2] with length 2
-				msg := ApplyMsg{
-					CommandValid: true,
-					Command:      entry.Command,
-					CommandIndex: rf.lastApplied,
+			for !rf.killed() {
+				rf.mu.Lock()
+				if rf.commitIndex > rf.lastApplied {
+					rf.lastApplied++
+					GPrintf("%v %v:BEGIN TO APPLY commitIndex:%v lastApplied:%v localIndex:%v", rf.state, rf.me, rf.commitIndex, rf.lastApplied, rf.logic2localIndex(rf.lastApplied))
+					entry := rf.log[rf.logic2localIndex(rf.lastApplied)] // todo runtime error: index out of range [2] with length 2 maybe have to lock
+					msg := ApplyMsg{
+						CommandValid: true,
+						Command:      entry.Command,
+						CommandIndex: rf.lastApplied,
+					}
+					rf.mu.Unlock()
+					rf.applyCh <- msg
+					HPrintf("%v %v:APPLY COMPLETE, command:%v, command index:%v", rf.state, rf.me, msg.Command, msg.CommandIndex)
+				} else {
+					rf.mu.Unlock()
+					break
 				}
-				rf.applyCh <- msg
-				HPrintf("%v %v:APPLY COMPLETE, command:%v, command index:%v", rf.state, rf.me, msg.Command, msg.CommandIndex)
 			}
-			//rf.mu.Unlock()
 		}
 	}
 }
@@ -1092,7 +1198,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) reInitAfterElection() {
 	for i := range rf.nextIndex {
 		//initialized to leader last log index + 1
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = rf.logicLogLen()
 	}
 	rf.matchIndex = make([]int, len(rf.peers)) //initialized to 0
 }
