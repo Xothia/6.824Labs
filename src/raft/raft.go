@@ -415,7 +415,7 @@ func (rf *Raft) unlock(methodName string) {
 // the second return value is the current term.
 // the third return value is true if this server believes it is the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	GPrintf("%v %v:Start() is invoked,command:%v", rf.state, rf.me, command)
+	FPrintf("%v %v:Start() is invoked,command:%v", rf.state, rf.me, command)
 	rf.mu.Lock()
 	index := -1
 	term := rf.currentTerm
@@ -432,12 +432,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	index = rf.appendLogWithoutLock(newEntry)
 	//info ae here comes a new log
-	GPrintf("%v %v:Start() is going to write NewEntryInfoChan, index:%v ,command:%v", rf.state, rf.me, index, command)
+	FPrintf("%v %v:Start() is going to write NewEntryInfoChan, index:%v ,command:%v", rf.state, rf.me, index, command)
 	rf.printLogs()
 	// todo update nextIndex[]
 	rf.NewEntryInfoChan <- index
 	rf.mu.Unlock()
-	GPrintf("%v %v:Start() is end, NewEntryInfoChan <- index, index:%v ,command:%v", rf.state, rf.me, index, command)
+	FPrintf("%v %v:Start() is end, NewEntryInfoChan <- index, index:%v ,command:%v", rf.state, rf.me, index, command)
 	return index, term, isLeader
 }
 
@@ -817,6 +817,17 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 		reply.ConflictTermFirstIndex = lastLogIndex + 1
 		return
 	}
+	if args.PrevLogIndex < rf.lastIncludedIndex { //del
+		return
+		//if rf.lastIncludedIndex+1-args.PrevLogIndex < len(args.Entries) { //contains some legal entry
+		//	args.PrevLogIndex = rf.lastIncludedIndex
+		//	args.PrevLogTerm = args.Entries[rf.lastIncludedIndex-args.PrevLogIndex].Term
+		//	args.Entries = args.Entries[rf.lastIncludedIndex+1-args.PrevLogIndex:]
+		//	return
+		//} else { //all entries are in snapShot, which means that this request is expired
+		//	return
+		//}
+	}
 	if rf.logic2localIndex(args.PrevLogIndex) > 0 &&
 		rf.log[rf.logic2localIndex(args.PrevLogIndex)].Term != args.PrevLogTerm { // todo panic: runtime error: index out of range [2] with length 2
 		//optimize quickly over incorrect
@@ -848,7 +859,8 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	matchFlag := true
 	for index, entry := range args.Entries {
 		if args.PrevLogIndex+index+1 >= rf.logicLogLen() || //illegal index
-			rf.log[rf.logic2localIndex(args.PrevLogIndex+index+1)].Term != entry.Term { //term unmatched
+			//args.PrevLogIndex+index+1 < rf.lastIncludedIndex || //illegal index
+			rf.log[rf.logic2localIndex(args.PrevLogIndex+index+1)].Term != entry.Term { //term unmatched todo sometimes out of range -X
 			rf.setPersistentState(-1, -2, rf.log[:rf.logic2localIndex(args.PrevLogIndex+1)], -1, -1, nil) //delete logs after args.PrevLogIndex
 			//rf.log = rf.log[:args.PrevLogIndex+1] //delete logs after args.PrevLogIndex
 			matchFlag = false
@@ -1100,7 +1112,7 @@ func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increm
 				rf.mu.Lock()
 				if rf.commitIndex > rf.lastApplied {
 					rf.lastApplied++
-					HPrintf("%v %v:BEGIN TO APPLY commitIndex:%v lastApplied:%v localIndex:%v", rf.state, rf.me, rf.commitIndex, rf.lastApplied, rf.logic2localIndex(rf.lastApplied))
+					DPrintf("%v %v:BEGIN TO APPLY commitIndex:%v lastApplied:%v localIndex:%v", rf.state, rf.me, rf.commitIndex, rf.lastApplied, rf.logic2localIndex(rf.lastApplied))
 					entry := rf.log[rf.logic2localIndex(rf.lastApplied)] // todo runtime error: index out of range [2] with length 2 maybe have to lock
 					msg := ApplyMsg{
 						CommandValid: true,
@@ -1213,8 +1225,26 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//rf.persist()
 	rf.readPersist(persister.ReadRaftState())
 	//todo bugs may be here (nextIndex/Log)
+	HPrintf("%v %v:is initialing...", me, rf.state)
 	if len(persister.ReadSnapshot()) > 0 {
 		// todo restore snapshot reassign lastCommitted lastApplied
+		rf.log[0].Term = rf.lastIncludedTerm
+		rf.commitIndex = rf.lastIncludedIndex
+		rf.lastApplied = rf.lastIncludedIndex
+		//send snapshot for service to update
+		applyMsg := ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      persister.ReadSnapshot(),
+			SnapshotTerm:  rf.lastIncludedTerm,
+			SnapshotIndex: rf.lastIncludedIndex,
+		}
+		rf.mu.Lock()
+		go func() {
+			defer rf.mu.Unlock()
+			rf.applyCh <- applyMsg
+		}()
+
+		HPrintf("%v %v:SUCCESS Install Snapshot when initializing, curTerm:%v", rf.state, rf.me, rf.currentTerm)
 	}
 	HPrintf("%v %v:COME TO LIFE, currentTerm:%v, votedFor:%v", rf.state, rf.me, rf.currentTerm, rf.votedFor)
 	rf.printLogs()
