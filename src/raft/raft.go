@@ -95,6 +95,7 @@ type Raft struct {
 	votedFor          int
 	log               []Entry
 	lastIncludedIndex int
+	lastIncludedTerm  int
 	//Volatile state on all servers:
 	commitIndex int
 	lastApplied int
@@ -120,8 +121,8 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
-// currentTerm:-1 for nil; voteFor:-2 for nil; log nil for nil
-func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry, lastIncludedIndex int, snapshot []byte) {
+// currentTerm,lastIncludedIndex,lastIncludedTerm:-1 for nil; voteFor:-2 for nil; log nil for nil;
+func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry, lastIncludedIndex int, lastIncludedTerm int, snapshot []byte) {
 	someThingChanged := false
 
 	if currentTerm > -1 {
@@ -138,6 +139,10 @@ func (rf *Raft) setPersistentState(currentTerm int, votedFor int, log []Entry, l
 	}
 	if lastIncludedIndex > -1 {
 		rf.lastIncludedIndex = lastIncludedIndex
+		someThingChanged = true
+	}
+	if lastIncludedTerm > -1 {
+		rf.lastIncludedTerm = lastIncludedTerm
 		someThingChanged = true
 	}
 	if someThingChanged {
@@ -166,7 +171,8 @@ func (rf *Raft) persist(snapshot []byte) {
 	if e.Encode(rf.currentTerm) != nil ||
 		e.Encode(rf.votedFor) != nil ||
 		e.Encode(rf.log) != nil ||
-		e.Encode(rf.lastIncludedIndex) != nil {
+		e.Encode(rf.lastIncludedIndex) != nil ||
+		e.Encode(rf.lastIncludedTerm) != nil {
 		DPrintf("persist failed.")
 	} else {
 		raftState := w.Bytes()
@@ -191,16 +197,19 @@ func (rf *Raft) readPersist(data []byte) {
 	var votedFor int
 	var log []Entry
 	var lastIncludedIndex int
+	var lastIncludedTerm int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&log) != nil ||
-		d.Decode(&lastIncludedIndex) != nil {
+		d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil {
 		DPrintf("readPersist failed.")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
 		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
 		DPrintf("readPersist success.currentTerm:%v,votedFor:%v,log:%v,date:%v", currentTerm, votedFor, log, data)
 	}
 }
@@ -263,7 +272,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.commitIndex = reLastIn
 	rf.lastApplied = reLastIn
-	rf.setPersistentState(-1, -2, newLogs, reLastIn, args.Snapshot)
+	rf.setPersistentState(-1, -2, newLogs, reLastIn, args.LastIncludedTerm, args.Snapshot)
 	for i := 0; i < len(rf.NewCommitInfoChan); i++ {
 		<-rf.NewCommitInfoChan
 	}
@@ -291,7 +300,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	HPrintf("%v %v:Snapshot INVOKED,snapshot:%v ,index:%v , curTerm:%v", rf.state, rf.me, len(snapshot), index, rf.currentTerm)
 	discardIndex := rf.logic2localIndex(index)
-	rf.setPersistentState(-1, -2, rf.log[discardIndex:], index, snapshot)
+	lastIncludedTerm := rf.log[discardIndex].Term
+	rf.setPersistentState(-1, -2, rf.log[discardIndex:], index, lastIncludedTerm, snapshot)
 	HPrintf("%v %v:Snapshot END, curTerm:%v, read snapShot:%v", rf.state, rf.me, rf.currentTerm, len(rf.persister.ReadSnapshot()))
 	rf.mu.Unlock()
 }
@@ -839,7 +849,7 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	for index, entry := range args.Entries {
 		if args.PrevLogIndex+index+1 >= rf.logicLogLen() || //illegal index
 			rf.log[rf.logic2localIndex(args.PrevLogIndex+index+1)].Term != entry.Term { //term unmatched
-			rf.setPersistentState(-1, -2, rf.log[:rf.logic2localIndex(args.PrevLogIndex+1)], -1, nil) //delete logs after args.PrevLogIndex
+			rf.setPersistentState(-1, -2, rf.log[:rf.logic2localIndex(args.PrevLogIndex+1)], -1, -1, nil) //delete logs after args.PrevLogIndex
 			//rf.log = rf.log[:args.PrevLogIndex+1] //delete logs after args.PrevLogIndex
 			matchFlag = false
 			break
@@ -875,7 +885,7 @@ func (rf *Raft) electionTimeoutEventHandler(terminateSignal <-chan bool) bool {
 	win := rf.handleVotes(voteReply, terminateSignal)
 	if !win { //do not win election
 		DPrintf("%v %v:LOSE ELECTION", rf.state, rf.me)
-		rf.setPersistentState(-1, -1, nil, -1, nil)
+		rf.setPersistentState(-1, -1, nil, -1, -1, nil)
 		//rf.votedFor = -1 //reset votedFor
 		return true
 	}
@@ -890,7 +900,7 @@ func (rf *Raft) transferToLeader() {
 	//todo no-op append entry
 	rf.mu.Lock()
 	rf.state = LEADER
-	rf.setPersistentState(-1, -2, nil, -1, nil)
+	rf.setPersistentState(-1, -2, nil, -1, -1, nil)
 	//rf.votedFor = -1 //reset votedFor
 	rf.reInitAfterElection()
 	//rf.doNoOp()
@@ -942,7 +952,7 @@ func (rf *Raft) requestVoteEventHandler(args *RequestVoteArgs, reply *RequestVot
 		return
 	}
 	//candidate up-to-date granted vote
-	rf.setPersistentState(-1, args.CandidateId, nil, -1, nil)
+	rf.setPersistentState(-1, args.CandidateId, nil, -1, -1, nil)
 	//rf.votedFor = args.CandidateId
 	reply.VoteGranted = true
 	reply.PeerId = rf.me
@@ -958,7 +968,7 @@ func (rf *Raft) transferToCandidate() (chan *RequestVoteReply, int) { //return r
 	rf.state = CANDIDATE
 	//rf.currentTerm++
 	//rf.votedFor = rf.me
-	rf.setPersistentState(rf.currentTerm+1, rf.me, nil, -1, nil)
+	rf.setPersistentState(rf.currentTerm+1, rf.me, nil, -1, -1, nil)
 	term := rf.currentTerm
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
 	HPrintf("%v %v:TRANSFER TO CANDIDATE. currentTerm:%v", rf.state, rf.me, term)
@@ -1015,7 +1025,7 @@ func (rf *Raft) handleVotes(replyChan chan *RequestVoteReply, terminateSignal <-
 
 func (rf *Raft) transferToFollower(curTerm int) {
 	rf.state = FOLLOWER
-	rf.setPersistentState(curTerm, -1, nil, -1, nil)
+	rf.setPersistentState(curTerm, -1, nil, -1, -1, nil)
 	//rf.currentTerm = curTerm
 	//rf.votedFor = -1 //reset votedFor
 	rf.resetTicker(ELEC_TOUT_LOBOUND, ELEC_TOUT_UPBOUND)
@@ -1132,7 +1142,7 @@ func (rf *Raft) resetTicker(lowerBound int64, upperBound int64) {
 }
 
 func (rf *Raft) appendLogWithoutLock(e Entry) int {
-	rf.setPersistentState(-1, -2, append(rf.log, e), -1, nil) //delete logs after args.PrevLogIndex
+	rf.setPersistentState(-1, -2, append(rf.log, e), -1, -1, nil) //delete logs after args.PrevLogIndex
 	//rf.log = append(rf.log, e)
 	return rf.logicLogLen() - 1
 }
