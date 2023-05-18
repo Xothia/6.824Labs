@@ -70,11 +70,12 @@ const (
 
 // Raft A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+	mu           sync.RWMutex // Lock to protect shared access to this peer's state
+	snapShotLock sync.RWMutex
+	peers        []*labrpc.ClientEnd // RPC end points of all peers
+	persister    *Persister          // Object to hold this peer's persisted state
+	me           int                 // this peer's index into peers[]
+	dead         int32               // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
 	//timer
@@ -169,6 +170,9 @@ func (rf *Raft) persist(snapshot []byte) {
 		DPrintf("persist failed.")
 	} else {
 		raftState := w.Bytes()
+		if snapshot == nil {
+			snapshot = rf.persister.ReadSnapshot()
+		}
 		rf.persister.Save(raftState, snapshot)
 		DPrintf("persist success, raft state:%v", rf.persister.ReadRaftState())
 	}
@@ -216,6 +220,7 @@ type InstallSnapshotArgs struct {
 	LeaderId          int //so follower can redirect clients
 	LastIncludedIndex int
 	LastIncludedTerm  int //term of lastIncludedIndex
+	Command           interface{}
 	Snapshot          []byte
 }
 type InstallSnapshotReply struct {
@@ -229,21 +234,24 @@ func (rf *Raft) callInstallSnapshot(server int, args *InstallSnapshotArgs) (ok b
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.snapShotLock.Lock()
 	rf.mu.Lock()
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		rf.mu.Unlock()
+		rf.snapShotLock.Unlock()
 		return
 	}
 	reLastIn := args.LastIncludedIndex
 	if reLastIn < rf.lastIncludedIndex {
 		rf.mu.Unlock()
+		rf.snapShotLock.Unlock()
 		return
 	}
 	newLogs := make([]Entry, 0)
 	newLogs = append(newLogs, Entry{
 		Term:    args.LastIncludedTerm,
-		Command: nil,
+		Command: args.Command,
 	})
 
 	if rf.lastIncludedIndex <= reLastIn && reLastIn < rf.logicLogLen() &&
@@ -268,9 +276,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotIndex: args.LastIncludedIndex,
 	}
 	rf.mu.Unlock()
+	rf.snapShotLock.Unlock()
 	rf.applyCh <- applyMsg
-	HPrintf("%v %v:SUCCESS Install Snapshot, curTerm:%v", rf.state, rf.me, rf.currentTerm)
-
+	HPrintf("%v %v:SUCCESS Install Snapshot, curTerm:%v, snapshot:%v", rf.state, rf.me, rf.currentTerm, len(args.Snapshot))
+	rf.printLogs()
 }
 
 // Snapshot the service says it has created a snapshot that has
@@ -279,12 +288,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	HPrintf("%v %v:Snapshot INVOKED, index:%v , curTerm:%v", rf.state, rf.me, index, rf.currentTerm)
 	rf.mu.Lock()
+	HPrintf("%v %v:Snapshot INVOKED,snapshot:%v ,index:%v , curTerm:%v", rf.state, rf.me, len(snapshot), index, rf.currentTerm)
 	discardIndex := rf.logic2localIndex(index)
 	rf.setPersistentState(-1, -2, rf.log[discardIndex:], index, snapshot)
+	HPrintf("%v %v:Snapshot END, curTerm:%v, read snapShot:%v", rf.state, rf.me, rf.currentTerm, len(rf.persister.ReadSnapshot()))
 	rf.mu.Unlock()
-	HPrintf("%v %v:Snapshot END, curTerm:%v", rf.state, rf.me, rf.currentTerm)
 }
 
 type AppendEntriesArgs struct {
@@ -460,7 +469,8 @@ func (rf *Raft) heartBeatService() {
 	}
 }
 
-func (rf *Raft) appendNewEntry(peer int, tempLog []Entry, newEntryIndex int, successInfoChan chan<- bool, terminateInfoChan <-chan bool) {
+func (rf *Raft) appendNewEntry(peer int, newEntryIndex int, successInfoChan chan<- bool, terminateInfoChan <-chan bool) {
+	//defer rf.snapShotLock.RUnlock()
 	rf.mu.RLock()
 	index := rf.nextIndex[peer]
 	rf.mu.RUnlock()
@@ -491,16 +501,21 @@ func (rf *Raft) appendNewEntry(peer int, tempLog []Entry, newEntryIndex int, suc
 			}
 			if index <= rf.lastIncludedIndex {
 				HPrintf("%v %v:appendNewEntry to %v failed due to left behind try install snapshot, index:%v, newEntryIndex+1:%v", rf.state, rf.me, peer, index, newEntryIndex+1)
-				rf.mu.Unlock()
 				// todo what if never return
 				// todo need to be done
-				ok, iSReply := rf.callInstallSnapshot(peer, &InstallSnapshotArgs{
+				arg := &InstallSnapshotArgs{
 					Term:              rf.currentTerm,
 					LeaderId:          rf.me,
 					LastIncludedIndex: rf.lastIncludedIndex,
 					LastIncludedTerm:  rf.log[0].Term,
+					Command:           rf.log[0].Command,
 					Snapshot:          rf.persister.ReadSnapshot(),
-				})
+				}
+				rf.mu.Unlock()
+				if len(arg.Snapshot) == 0 {
+					HPrintf("%v %v:Snapshot is NIL!!!:%v", rf.state, rf.me, len(rf.persister.snapshot))
+				}
+				ok, iSReply := rf.callInstallSnapshot(peer, arg)
 
 				rf.mu.Lock()
 				if !ok { //network failed
@@ -516,14 +531,15 @@ func (rf *Raft) appendNewEntry(peer int, tempLog []Entry, newEntryIndex int, suc
 				}
 				rf.nextIndex[peer] = newEntryIndex + 1
 				rf.matchIndex[peer] = newEntryIndex
+				index = rf.nextIndex[peer]
 				rf.mu.Unlock()
 				successInfoChan <- true
 				HPrintf("%v %v:appendNewEntry FINAL SUCCESS because callInstallSnapshot, index:%v", rf.state, rf.me, index)
-				return
+				continue
 			}
 			//}
 
-			arg := rf.makeAEArgsByIndex(index, newEntryIndex+1, tempLog)
+			arg := rf.makeAEArgsByIndex(index, newEntryIndex+1)
 			rf.mu.Unlock()
 
 			ok := rf.sendAppendEntries(peer, &arg, &reply) //may return slowly
@@ -576,11 +592,11 @@ func (rf *Raft) appendNewEntry(peer int, tempLog []Entry, newEntryIndex int, suc
 func (rf *Raft) sendAppendEntryToPeers(newEntryIndex int) (chan bool, chan bool) {
 	successInfoChan := make(chan bool, 1)
 	terminateAppendNewEntryInfoChan := make(chan bool, len(rf.peers))
-	tempLog := rf.log[:]
 	for peer := range rf.peers {
 		if peer != rf.me {
 			HPrintf("%v %v:INVOKE rf.appendNewEntry(peer:%v, newEntryIndex:%v), curTerm:%v", rf.state, rf.me, peer, newEntryIndex, rf.currentTerm)
-			go rf.appendNewEntry(peer, tempLog, newEntryIndex, successInfoChan, terminateAppendNewEntryInfoChan)
+			//rf.snapShotLock.RLock()
+			go rf.appendNewEntry(peer, newEntryIndex, successInfoChan, terminateAppendNewEntryInfoChan)
 		} else {
 			rf.nextIndex[peer] = newEntryIndex + 1
 			rf.matchIndex[peer] = newEntryIndex
@@ -661,7 +677,9 @@ func (rf *Raft) newEntryEventHandler() {
 				rf.mu.Lock()
 				if rf.updateCommitIndex() {
 					rf.NewCommitInfoChan <- true
+					rf.sendHeartBeatToPeersWithoutLock()
 				}
+
 				rf.mu.Unlock()
 				HPrintf("%v %v:appendNewEntry Reply WAITING END:SUCCESS, New commitIndex:%v, curTerm:%v", rf.state, rf.me, rf.commitIndex, rf.currentTerm)
 			}(&aReplyHandlerIsProcessing)
@@ -686,7 +704,7 @@ func (rf *Raft) updateCommitIndex() bool {
 	}
 	return oldCommitIndex != rf.commitIndex
 }
-func (rf *Raft) makeAEArgsByIndex(beginIndex int, endIndex int, tempLog []Entry) AppendEntriesArgs {
+func (rf *Raft) makeAEArgsByIndex(beginIndex int, endIndex int) AppendEntriesArgs {
 	arg := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -806,7 +824,7 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	if args.Entries == nil { //a heartbeat signal BUT THIS PLACE IS WRONG
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = Min(args.LeaderCommit, rf.logicLogLen()-1)
-			DPrintf("%v %v:UPDATE COMMIT INDEX DRIVE BY HB, args.LeaderCommit:%v, len(rf.log)-1:%v,curTerm:%v, commitIndex:%v",
+			HPrintf("%v %v:UPDATE COMMIT INDEX DRIVE BY HB, args.LeaderCommit:%v, len(rf.log)-1:%v,curTerm:%v, commitIndex:%v",
 				rf.state, rf.me, args.LeaderCommit, rf.logicLogLen()-1, rf.currentTerm, rf.commitIndex)
 			rf.NewCommitInfoChan <- true
 		}
@@ -837,7 +855,7 @@ func (rf *Raft) appendEntriesEventHandler(args *AppendEntriesArgs, reply *Append
 	//update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = Min(args.LeaderCommit, rf.logicLogLen()-1)
-		DPrintf("%v %v:UPDATE COMMIT INDEX, args.LeaderCommit:%v, newLastIndex:%v, curTerm:%v, commitIndex:%v",
+		HPrintf("%v %v:UPDATE COMMIT INDEX, args.LeaderCommit:%v, newLastIndex:%v, curTerm:%v, commitIndex:%v",
 			rf.state, rf.me, args.LeaderCommit, rf.logicLogLen()-1, rf.currentTerm, rf.commitIndex)
 		rf.NewCommitInfoChan <- true //may deadlock due to Chan is full and blocked and lock is un-release
 	}
@@ -1072,7 +1090,7 @@ func (rf *Raft) applyCommittedRoutine() { //If commitIndex > lastApplied: increm
 				rf.mu.Lock()
 				if rf.commitIndex > rf.lastApplied {
 					rf.lastApplied++
-					GPrintf("%v %v:BEGIN TO APPLY commitIndex:%v lastApplied:%v localIndex:%v", rf.state, rf.me, rf.commitIndex, rf.lastApplied, rf.logic2localIndex(rf.lastApplied))
+					HPrintf("%v %v:BEGIN TO APPLY commitIndex:%v lastApplied:%v localIndex:%v", rf.state, rf.me, rf.commitIndex, rf.lastApplied, rf.logic2localIndex(rf.lastApplied))
 					entry := rf.log[rf.logic2localIndex(rf.lastApplied)] // todo runtime error: index out of range [2] with length 2 maybe have to lock
 					msg := ApplyMsg{
 						CommandValid: true,
@@ -1184,8 +1202,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	//rf.persist()
 	rf.readPersist(persister.ReadRaftState())
-
 	//todo bugs may be here (nextIndex/Log)
+	if len(persister.ReadSnapshot()) > 0 {
+		// todo restore snapshot reassign lastCommitted lastApplied
+	}
 	HPrintf("%v %v:COME TO LIFE, currentTerm:%v, votedFor:%v", rf.state, rf.me, rf.currentTerm, rf.votedFor)
 	rf.printLogs()
 	// start ticker goroutine to start elections
